@@ -9,7 +9,6 @@ class WeiboApi {
     'X-Requested-With': 'XMLHttpRequest',
   };
 
-  /// 🛠️ 宽容的链接提取
   static String? extractUrlFromText(String text) {
     RegExp regExp = RegExp(r'(https?://[a-zA-Z0-9\.\/\-\_\?\=\&\%\#]+)');
     var match = regExp.firstMatch(text);
@@ -22,103 +21,111 @@ class WeiboApi {
     return null;
   }
 
-  /// 🆔 纯正则提取 ID (新增 PC 链接支持)
   static String? parseIdFromUrl(String url) {
-    // 模式 1: status/123 (移动端)
+    // 移动端
     RegExp regStatus = RegExp(r'status(?:es)?\/(\d+)');
     var m1 = regStatus.firstMatch(url);
     if (m1 != null) return m1.group(1);
 
-    // 模式 2: detail/123 (移动端)
     RegExp regDetail = RegExp(r'detail\/(\d+)');
     var m2 = regDetail.firstMatch(url);
     if (m2 != null) return m2.group(1);
 
-    // 模式 3: weibo_id=123 (短链参数)
     RegExp regParam = RegExp(r'weibo_id=(\d+)');
     var m3 = regParam.firstMatch(url);
     if (m3 != null) return m3.group(1);
 
-    // 🆕 模式 4: weibo.com/u/123 (PC端)
-    // 结构：weibo.com/{用户ID}/{微博ID}
-    // 兼容纯数字ID和Base62字符串ID
-    RegExp regPc = RegExp(r'weibo\.com\/\d+\/([a-zA-Z0-9]+)');
+    // 🆕 PC端增强正则：支持数字或字母的用户ID
+    // 格式：weibo.com/用户ID/微博ID
+    RegExp regPc = RegExp(r'weibo\.com\/[a-zA-Z0-9]+\/([a-zA-Z0-9]+)');
     var m4 = regPc.firstMatch(url);
     if (m4 != null) return m4.group(1);
 
     return null;
   }
 
-  /// 🖼️ 获取图片列表
+  /// 🛠️ 链接转换：PC -> Mobile (为了更快加载和获取正确Cookie)
+  static String convertToMobileUrl(String url) {
+    if (url.contains("weibo.com")) {
+      String? id = parseIdFromUrl(url);
+      if (id != null) {
+        return "https://m.weibo.cn/status/$id";
+      }
+    }
+    return url;
+  }
+
   static Future<List<Map<String, String>>> getImageUrls(String weiboId, {String? cookie}) async {
     Dio dio = Dio();
     Map<String, String> headers = Map.from(_baseHeaders);
-    if (cookie != null && cookie.isNotEmpty) {
-      headers['Cookie'] = cookie;
-    }
+    if (cookie != null && cookie.isNotEmpty) headers['Cookie'] = cookie;
     dio.options.headers = headers;
 
     // 策略 A: 标准接口
     String urlA = "https://m.weibo.cn/statuses/show?id=$weiboId";
-    List<Map<String, String>> resultA = await _tryFetch(dio, urlA, "API-A");
-    if (resultA.isNotEmpty) return resultA;
+    List<Map<String, String>> resA = await _tryFetch(dio, urlA);
+    if (resA.isNotEmpty) return resA;
 
     // 策略 B: 扩展接口
     String urlB = "https://m.weibo.cn/statuses/extend?id=$weiboId";
-    List<Map<String, String>> resultB = await _tryFetch(dio, urlB, "API-B");
-    if (resultB.isNotEmpty) return resultB;
+    List<Map<String, String>> resB = await _tryFetch(dio, urlB);
+    if (resB.isNotEmpty) return resB;
 
     return [];
   }
 
-  static Future<List<Map<String, String>>> _tryFetch(Dio dio, String url, String tag) async {
+  static Future<List<Map<String, String>>> _tryFetch(Dio dio, String url) async {
     try {
       final response = await dio.get(url);
       if (response.statusCode == 200) {
-        final data = response.data;
-        List? pics;
-        
-        if (data is Map) {
-          if (data['pics'] != null) pics = data['pics'];
-          else if (data['data'] is Map && data['data']['pics'] != null) pics = data['data']['pics'];
-          else if (data['data'] is Map && data['data']['page_pic'] != null) pics = [data['data']['page_pic']];
-        }
-
-        if (pics == null || pics.isEmpty) return [];
-
-        List<Map<String, String>> results = [];
-        for (var pic in pics) {
-          String url = pic['large']?['url'] ?? pic['url'];
-          
-          String wmUrl = url.replaceAll(RegExp(r'(\/orj360\/|\/oslarge\/|\/mw690\/|\/thumbnail\/|\/bmiddle\/|\/thumb180\/)'), '/large/');
-          String origUrl = url.replaceAll(RegExp(r'(\/orj360\/|\/large\/|\/mw690\/|\/thumbnail\/|\/bmiddle\/|\/thumb180\/)'), '/oslarge/');
-          
-          Uri uri = Uri.parse(url);
-          String filename = uri.pathSegments.last.split('.').first;
-          String ext = ".${uri.pathSegments.last.split('.').last}";
-
-          results.add({
-            'wm_url': wmUrl,
-            'orig_url': origUrl,
-            'filename': filename,
-            'ext': ext
-          });
-        }
-        return results;
+        var data = response.data;
+        if (data is Map && data.containsKey('data')) data = data['data'];
+        return _parseWeiboJson(data);
       }
     } catch (e) {
-      print("❌ [$tag] Error: $e");
+      // ignore
     }
     return [];
   }
 
+  static List<Map<String, String>> _parseWeiboJson(dynamic data) {
+    if (data == null || data is! Map) return [];
+    
+    List<dynamic> pics = [];
+    if (data['pics'] != null) pics = data['pics'];
+    else if (data['retweeted_status'] != null && data['retweeted_status']['pics'] != null) pics = data['retweeted_status']['pics'];
+    else if (data['page_info'] != null && data['page_info']['page_pic'] != null) pics = [data['page_info']['page_pic']];
+
+    if (pics.isEmpty) return [];
+
+    List<Map<String, String>> results = [];
+    for (var pic in pics) {
+      String url = "";
+      if (pic is Map) {
+        url = pic['large']?['url'] ?? pic['url'] ?? "";
+      } else if (pic is String) {
+        url = pic;
+      }
+      if (url.isEmpty) continue;
+
+      String wmUrl = url.replaceAll(RegExp(r'(\/orj360\/|\/oslarge\/|\/mw690\/|\/thumbnail\/|\/bmiddle\/|\/thumb180\/|\/wap180\/)'), '/large/');
+      String origUrl = url.replaceAll(RegExp(r'(\/orj360\/|\/large\/|\/mw690\/|\/thumbnail\/|\/bmiddle\/|\/thumb180\/|\/wap180\/)'), '/oslarge/');
+      
+      Uri uri = Uri.parse(url);
+      String filename = uri.pathSegments.last.split('.').first;
+      String ext = ".${uri.pathSegments.last.split('.').last}";
+      if (ext.contains("?")) ext = ext.split("?").first;
+
+      results.add({'wm_url': wmUrl, 'orig_url': origUrl, 'filename': filename, 'ext': ext});
+    }
+    return results;
+  }
+
   static Future<Map<String, String>?> downloadPair(Map<String, String> item, Function(String) onLog) async {
     Dio dio = Dio();
-    // 保持 Referer 防盗链破解
     dio.options.headers = {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'User-Agent': _baseHeaders['User-Agent'],
       'Referer': 'https://weibo.com/',
-      'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
     };
     
     Directory tempDir = await getTemporaryDirectory();
@@ -134,7 +141,7 @@ class WeiboApi {
       ]);
       return {'wm': wmPath, 'clean': origPath};
     } catch (e) {
-      onLog("❌ 下载失败 (${item['filename']})");
+      onLog("❌ 下载失败");
       return null;
     }
   }
