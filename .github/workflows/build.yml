@@ -1,6 +1,5 @@
-name: Build Weibo Cleaner (Final Fix)
-on:
-  workflow_dispatch:
+name: Build Weibo Cleaner (Permissions Fix)
+on: workflow_dispatch
 
 env:
   APP_LABEL: "微博去水印"      
@@ -28,42 +27,28 @@ jobs:
         with:
           flutter-version: '3.19.0'
 
-      # 1. 重建工程
       - name: Recreate Android Project
         run: |
           mkdir -p user_backup
-          
           KOTLIN_PATH="android/app/src/main/kotlin/com/example/${{ env.PROJ_NAME }}/MainActivity.kt"
-          # 备份 Kotlin 代码
-          if [ -f "$KOTLIN_PATH" ]; then
-             cp "$KOTLIN_PATH" user_backup/
-          fi
-
-          # 删除旧安卓目录并重建
+          if [ -f "$KOTLIN_PATH" ]; then cp "$KOTLIN_PATH" user_backup/; fi
           rm -rf android
           flutter create . --platforms android --project-name ${{ env.PROJ_NAME }}
-
-          # 恢复 Kotlin 代码
           TARGET_DIR="android/app/src/main/kotlin/com/example/${{ env.PROJ_NAME }}"
           mkdir -p "$TARGET_DIR"
-          if [ -f "user_backup/MainActivity.kt" ]; then
-             cp user_backup/MainActivity.kt "$TARGET_DIR/"
-          fi
+          if [ -f "user_backup/MainActivity.kt" ]; then cp user_backup/MainActivity.kt "$TARGET_DIR/"; fi
 
-      # 2. ⚡⚡⚡【核心修复】强制重写 AndroidManifest.xml ⚡⚡⚡
-      # 这一步将强行注入网络权限和硬件加速开关
+      # ⚡ 权限降级：移除 MANAGE_EXTERNAL_STORAGE
       - name: Force Write AndroidManifest
         run: |
           cat > android/app/src/main/AndroidManifest.xml <<EOF
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-              <!-- ✅ 必须显式声明网络权限 -->
               <uses-permission android:name="android.permission.INTERNET"/>
               <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
-              <!-- 存储权限 -->
+              <!-- 基础存储权限 -->
               <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
               <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
               <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
-              <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>
 
               <application
                   android:label="${{ env.APP_LABEL }}"
@@ -71,7 +56,7 @@ jobs:
                   android:icon="@mipmap/ic_launcher"
                   android:usesCleartextTraffic="true" 
                   android:requestLegacyExternalStorage="true"
-                  android:hardwareAccelerated="true"> <!-- ✅ 必须开启硬件加速，否则WebView不启动 -->
+                  android:hardwareAccelerated="true"> 
                   
                   <activity
                       android:name=".MainActivity"
@@ -90,14 +75,11 @@ jobs:
                           <category android:name="android.intent.category.LAUNCHER"/>
                       </intent-filter>
                   </activity>
-                  <meta-data
-                      android:name="flutterEmbedding"
-                      android:value="2" />
+                  <meta-data android:name="flutterEmbedding" android:value="2" />
               </application>
           </manifest>
           EOF
 
-      # 3. 注入 build.gradle (保持不变)
       - name: Overwrite build.gradle
         run: |
           cat > android/app/build.gradle <<EOF
@@ -132,7 +114,6 @@ jobs:
           }
           EOF
 
-      # 4. 搬运模型
       - name: Place TFLite Model
         run: |
           mkdir -p android/app/src/main/assets
@@ -142,18 +123,13 @@ jobs:
             touch android/app/src/main/assets/yolov8_wm.tflite
           fi
 
-      # 5. 修复配置并打包
       - name: Build APK
         run: |
           sed -i 's/id "org.jetbrains.kotlin.android" version ".*"/id "org.jetbrains.kotlin.android" version "1.9.0"/g' android/settings.gradle
           flutter pub get
-          # 重新生成图标，因为我们重写了Manifest
-          if [ -f "assets/images/icon.png" ]; then
-             dart run flutter_launcher_icons
-          fi
+          if [ -f "assets/images/icon.png" ]; then dart run flutter_launcher_icons; fi
           flutter build apk --release --target-platform android-arm64
 
-      # 6. 上传
       - name: Rename and Upload
         run: |
           mv build/app/outputs/flutter-apk/app-release.apk "build/app/outputs/flutter-apk/${{ env.FILE_NAME }}.apk"
