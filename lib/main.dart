@@ -67,7 +67,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
 
   // 浏览器控制
   InAppWebViewController? _webViewController;
-  bool _isWebViewReady = false; // 标记内核是否就绪
+  bool _isWebViewReady = false; 
   bool _isWebViewLoading = false;
   Timer? _webViewTimeout;
 
@@ -124,14 +124,17 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     }
   }
 
-  // --- 浏览器相关逻辑 ---
+  // --- 浏览器逻辑 ---
   Future<void> _startBrowserAnalysis(String url) async {
+    // 强制重试机制：如果还没准备好，尝试等待 1 秒
     if (!_isWebViewReady || _webViewController == null) {
-      _addLog("⏳ 内核正在预热，请稍后重试...");
-      // 尝试重新加载一个空页面来唤醒
-      _webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri("about:blank")));
-      setState(() => _isProcessing = false);
-      return;
+      _addLog("⏳ 内核正在唤醒，尝试重载...");
+      await Future.delayed(const Duration(seconds: 1));
+      if (_webViewController == null) {
+         _addLog("❌ 内核启动失败。请尝试完全关闭APP并重新打开。\n(确保授予网络权限)");
+         setState(() => _isProcessing = false);
+         return;
+      }
     }
 
     _addLog("🕵️ 启动隐形侦察机: $url");
@@ -157,12 +160,12 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
 
   void _onWebViewUrlChanged(String? url) async {
     if (!_isWebViewLoading || url == null) return;
+    // _addLog("DEBUG: $url"); // 调试用
     String? id = WeiboApi.parseIdFromUrl(url);
     if (id != null) {
       _addLog("✅ 捕获真实ID: $id");
       _stopBrowserAnalysis();
-      // 停止加载后，跳转到一个空页面释放资源
-      _webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri("about:blank")));
+      _webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri("about:blank"))); // 释放内存
       await _startDownloadAndRepair(id);
     }
   }
@@ -219,51 +222,57 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      resizeToAvoidBottomInset: false, // 防止键盘弹出时挤压布局
       appBar: AppBar(
         title: const Text("Weibo Cleaner", style: TextStyle(fontWeight: FontWeight.bold)),
         actions: [IconButton(icon: const Icon(Icons.palette), onPressed: _showSkinDialog)],
         bottom: TabBar(controller: _tabController, indicatorColor: Colors.white, tabs: const [Tab(text: "链接"), Tab(text: "单张"), Tab(text: "批量")]),
       ),
-      // 🌟🌟🌟 核心改动：使用 IndexedStack 确保 WebView 始终被渲染 🌟🌟🌟
-      body: IndexedStack(
-        index: 1, // 显示 Index 1 (主界面)，Index 0 (浏览器) 在底层运行
+      // 🌟🌟🌟 核心黑科技：使用 Stack 强行渲染 1x1 像素的浏览器 🌟🌟🌟
+      body: Stack(
         children: [
-          // Index 0: 隐形浏览器 (全屏渲染，但被遮挡)
-          InAppWebView(
-            initialSettings: InAppWebViewSettings(
-              userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
-              javaScriptEnabled: true,
-              useShouldOverrideUrlLoading: true,
-              mediaPlaybackRequiresUserGesture: false,
+          // 图层 0: 隐形浏览器 (1像素，必须放在 Stack 底部)
+          Positioned(
+            left: 0, 
+            top: 0, 
+            width: 1, 
+            height: 1,
+            child: Opacity(
+              opacity: 0.01, // 不能设为0，否则有些系统不渲染；设为0.01肉眼不可见但系统可见
+              child: InAppWebView(
+                initialSettings: InAppWebViewSettings(
+                  userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+                  javaScriptEnabled: true,
+                  useShouldOverrideUrlLoading: true,
+                  mediaPlaybackRequiresUserGesture: false,
+                ),
+                onWebViewCreated: (controller) {
+                  _webViewController = controller;
+                  _isWebViewReady = true;
+                  _addLog("✅ 内核装载成功 (Pixel Mode)");
+                },
+                onLoadStop: (controller, url) => _onWebViewUrlChanged(url?.toString()),
+                onUpdateVisitedHistory: (controller, url, isReload) => _onWebViewUrlChanged(url?.toString()),
+              ),
             ),
-            onWebViewCreated: (controller) {
-              _webViewController = controller;
-              _isWebViewReady = true;
-              // 这里的日志现在能看到了！
-              _addLog("✅ 内核装载成功 (Hidden Mode)");
-            },
-            onLoadStop: (controller, url) => _onWebViewUrlChanged(url?.toString()),
-            onUpdateVisitedHistory: (controller, url, isReload) => _onWebViewUrlChanged(url?.toString()),
-            onReceivedError: (controller, request, error) {
-               // 忽略部分网络错误，只要流程不崩
-               // _addLog("Browser Err: ${error.description}"); 
-            },
           ),
-          
-          // Index 1: 您的主界面
-          Column(
-            children: [
-              _buildControlPanel(),
-              Expanded(child: TabBarView(controller: _tabController, children: [_buildLinkTab(), _buildSingleTab(), _buildBatchTab()])),
-              _buildLogArea(),
-            ],
+
+          // 图层 1: 主界面 (覆盖在浏览器上方)
+          Positioned.fill(
+            child: Column(
+              children: [
+                _buildControlPanel(),
+                Expanded(child: TabBarView(controller: _tabController, children: [_buildLinkTab(), _buildSingleTab(), _buildBatchTab()])),
+                _buildLogArea(),
+              ],
+            ),
           ),
         ],
       ),
     );
   }
 
-  // --- 以下 UI 组件保持不变 ---
+  // --- UI 组件保持不变 ---
   Widget _buildLinkTab() {
     return Padding(padding: const EdgeInsets.all(16.0), child: Column(children: [
       TextField(controller: _linkController, decoration: InputDecoration(hintText: "在此粘贴微博链接", border: const OutlineInputBorder(), suffixIcon: IconButton(icon: const Icon(Icons.paste), onPressed: () async { ClipboardData? data = await Clipboard.getData(Clipboard.kTextPlain); if (data != null && data.text != null) _linkController.text = data.text!; }))),
