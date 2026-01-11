@@ -15,11 +15,9 @@ dependencies:
   permission_handler: ^11.3.0
   fluttertoast: ^8.2.4
   path_provider: ^2.1.2
-  # 👇 网络请求新增
+  dio: ^5.4.0
+  # 👇 纯净的 HTTP 库，有时候比 Dio 处理重定向更直观
   http: ^1.2.0
-  dio: ^5.4.0 
-  # 👇 简单的本地存储用来存配置
-  shared_preferences: ^2.2.2
 
 dev_dependencies:
   flutter_test:
@@ -29,3 +27,11 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/images/
+
+flutter_launcher_icons:
+  android: "launcher_icon"
+  ios: false
+  image_path: "assets/images/icon.png"
+  min_sdk_android: 24

@@ -3,9 +3,11 @@ package com.example.weibo_cleaner
 import android.content.ContentValues
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.MediaScannerConnection
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import android.util.Log
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -25,13 +27,14 @@ import org.tensorflow.lite.support.image.ImageProcessor
 import org.tensorflow.lite.support.image.TensorImage
 import org.tensorflow.lite.support.image.ops.ResizeOp
 import java.io.File
+import java.io.FileOutputStream
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 class MainActivity : FlutterActivity() {
     private val CHANNEL = "com.example.weibo_cleaner/processor"
     private var tflite: Interpreter? = null
-    // YOLOv8 默认输入尺寸
     private val INPUT_SIZE = 640 
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -41,165 +44,167 @@ class MainActivity : FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
             if (call.method == "processImages") {
                 val tasks = call.argument<List<Map<String, String>>>("tasks") ?: listOf()
-                val conf = call.argument<Double>("confidence")?.toFloat() ?: 0.5f
-                val padding = call.argument<Double>("padding")?.toFloat() ?: 0.1f
-
+                val confThreshold = call.argument<Double>("confidence")?.toFloat() ?: 0.4f
+                val paddingRatio = call.argument<Double>("padding")?.toFloat() ?: 0.1f
+                
                 CoroutineScope(Dispatchers.IO).launch {
-                    initModel()
+                    val logs = StringBuilder()
                     var successCount = 0
                     
-                    tasks.forEach { task ->
-                        val wmPath = task["wm"]!!
-                        val cleanPath = task["clean"]!!
-                        if (processOne(wmPath, cleanPath, conf, padding)) {
-                            successCount++
+                    try {
+                        if (tflite == null) {
+                            logs.append("Load Model...\n")
+                            val modelFile = FileUtil.loadMappedFile(context, "yolov8_wm.tflite")
+                            tflite = Interpreter(modelFile)
+                            logs.append("Model Loaded.\n")
                         }
+                        
+                        tasks.forEach { task ->
+                            val wmPath = task["wm"]!!
+                            val cleanPath = task["clean"]!!
+                            val res = processOneImage(wmPath, cleanPath, confThreshold, paddingRatio, logs)
+                            if (res) successCount++
+                        }
+                    } catch (e: Exception) {
+                        logs.append("Critical Error: ${e.message}\n")
                     }
 
                     withContext(Dispatchers.Main) {
-                        result.success(mapOf("count" to successCount))
+                        result.success(mapOf("count" to successCount, "logs" to logs.toString()))
                     }
                 }
             }
         }
     }
 
-    private fun initModel() {
-        if (tflite == null) {
-            val modelFile = FileUtil.loadMappedFile(context, "yolov8_wm.tflite") // 对应转换后的文件名
-            val options = Interpreter.Options()
-            tflite = Interpreter(modelFile, options)
-        }
-    }
-
-    private fun processOne(wmPath: String, origPath: String, conf: Float, pad: Float): Boolean {
+    private fun processOneImage(wmPath: String, cleanPath: String, confThreshold: Float, paddingRatio: Float, logs: StringBuilder): Boolean {
         try {
-            // 1. 加载图片
             val wmBitmap = BitmapFactory.decodeFile(wmPath) ?: return false
-            val origBitmap = BitmapFactory.decodeFile(origPath) ?: return false
+            val cleanBitmap = BitmapFactory.decodeFile(cleanPath) ?: return false
 
-            // 2. YOLO 预处理
             val imageProcessor = ImageProcessor.Builder()
                 .add(ResizeOp(INPUT_SIZE, INPUT_SIZE, ResizeOp.ResizeMethod.BILINEAR))
-                .add(NormalizeOp(0f, 255f)) // YOLOv8 需要归一化到 0-1
+                .add(NormalizeOp(0f, 255f)) // ⚠️ 关键：LOFTER 用的就是这个
                 .build()
             var tImage = TensorImage.fromBitmap(wmBitmap)
             tImage = imageProcessor.process(tImage)
 
-            // 3. 推理
-            // YOLOv8 输出通常是 [1, 5, 8400] (xywh + conf)
-            // 有些导出可能是 [1, 8400, 5]，需要判断形状
             val outputTensor = tflite!!.getOutputTensor(0)
-            val shape = outputTensor.shape() // e.g. [1, 5, 8400]
+            val outputShape = outputTensor.shape() 
+            // 自动判断维度
+            val dim1 = outputShape[1]
+            val dim2 = outputShape[2]
+            val outputArray = Array(1) { Array(dim1) { FloatArray(dim2) } }
             
-            // 准备接收数组
-            // 假设是 [1, 5, 8400] 的情况
-            val outputs = Array(1) { Array(shape[1]) { FloatArray(shape[2]) } }
-            tflite!!.run(tImage.buffer, outputs)
+            tflite!!.run(tImage.buffer, outputArray)
 
-            // 4. 解析输出找到最佳框
-            val box = parseYoloOutput(outputs[0], conf, wmBitmap.width, wmBitmap.height, pad) 
-                ?: return false // 没找到水印
+            // 尝试两种解析方式
+            var bestBox: Rect? = null
+            if (dim1 > dim2) {
+                 bestBox = parseOutputTransposed(outputArray[0], confThreshold, wmBitmap.width, wmBitmap.height, paddingRatio)
+            } else {
+                 bestBox = parseOutputStandard(outputArray[0], confThreshold, wmBitmap.width, wmBitmap.height, paddingRatio)
+            }
 
-            // 5. OpenCV 修复
-            return repairImage(wmBitmap, origBitmap, box, wmPath)
-
+            if (bestBox != null) {
+                logs.append("Target Found: $bestBox\n")
+                repairWithOpenCV(wmBitmap, cleanBitmap, bestBox, wmPath)
+                return true
+            } else {
+                logs.append("No watermark found (Max Conf < $confThreshold)\n")
+                return false
+            }
         } catch (e: Exception) {
-            e.printStackTrace()
+            logs.append("Err processing ${File(wmPath).name}: ${e.message}\n")
             return false
         }
     }
 
-    // 解析 [5, 8400] 的 YOLO 输出
-    private fun parseYoloOutput(data: Array<FloatArray>, confThresh: Float, imgW: Int, imgH: Int, pad: Float): Rect? {
-        // data[0..3] 是 x,y,w,h (中心点坐标)
-        // data[4] 是 置信度
-        // 维度检查：如果是 [8400, 5] 需要转置逻辑，这里假设是 [5, 8400]
-        val numProposals = data[0].size // 8400
-        
+    // --- 标准解析 (5, 8400) ---
+    private fun parseOutputStandard(rows: Array<FloatArray>, confThresh: Float, imgW: Int, imgH: Int, pad: Float): Rect? {
+        val numAnchors = rows[0].size 
         var maxConf = 0f
         var bestIdx = -1
-
-        for (i in 0 until numProposals) {
-            val confidence = data[4][i]
-            if (confidence > maxConf) {
-                maxConf = confidence
-                bestIdx = i
-            }
+        // data[4] 是置信度
+        for (i in 0 until numAnchors) {
+            val conf = rows[4][i] 
+            if (conf > maxConf) { maxConf = conf; bestIdx = i }
         }
-
         if (maxConf < confThresh) return null
-
-        // 提取坐标 (归一化后的中心点 xywh)
-        val cx = data[0][bestIdx]
-        val cy = data[1][bestIdx]
-        val w = data[2][bestIdx]
-        val h = data[3][bestIdx]
-
-        // 还原到原图尺寸
-        // YOLO输出是基于 640x640 的，需要映射回 imgW x imgH
-        val xFactor = imgW.toFloat() / INPUT_SIZE
-        val yFactor = imgH.toFloat() / INPUT_SIZE
-
-        val boxX = (cx - w / 2) * xFactor
-        val boxY = (cy - h / 2) * yFactor
-        val boxW = w * xFactor
-        val boxH = h * yFactor
-
-        // 应用 Padding (区域扩大)
-        val padW = boxW * pad
-        val padH = boxH * pad
-
-        val rectX = (boxX - padW).toInt()
-        val rectY = (boxY - padH).toInt()
-        val rectW = (boxW + padW * 2).toInt()
-        val rectH = (boxH + padH * 2).toInt()
-
-        return Rect(rectX, rectY, rectW, rectH)
+        return convertToRect(rows[0][bestIdx], rows[1][bestIdx], rows[2][bestIdx], rows[3][bestIdx], imgW, imgH, pad)
     }
 
-    private fun repairImage(wmBm: Bitmap, origBm: Bitmap, rect: Rect, pathName: String): Boolean {
-        // 使用 OpenCV 覆盖
+    // --- 转置解析 (8400, 5) ---
+    private fun parseOutputTransposed(rows: Array<FloatArray>, confThresh: Float, imgW: Int, imgH: Int, pad: Float): Rect? {
+        var maxConf = 0f
+        var bestIdx = -1
+        // row[i][4] 是置信度
+        for (i in rows.indices) {
+            val conf = rows[i][4] 
+            if (conf > maxConf) { maxConf = conf; bestIdx = i }
+        }
+        if (maxConf < confThresh) return null
+        return convertToRect(rows[bestIdx][0], rows[bestIdx][1], rows[bestIdx][2], rows[bestIdx][3], imgW, imgH, pad)
+    }
+
+    private fun convertToRect(cx: Float, cy: Float, w: Float, h: Float, imgW: Int, imgH: Int, paddingRatio: Float): Rect {
+        val isNormalized = w < 1.0f 
+        val normCx = if (isNormalized) cx * INPUT_SIZE else cx
+        val normCy = if (isNormalized) cy * INPUT_SIZE else cy
+        val normW = if (isNormalized) w * INPUT_SIZE else w
+        val normH = if (isNormalized) h * INPUT_SIZE else h
+
+        val scaleX = imgW.toFloat() / INPUT_SIZE
+        val scaleY = imgH.toFloat() / INPUT_SIZE
+        
+        val width = normW * scaleX
+        val height = normH * scaleY
+        // 中心点转左上角
+        val x = (normCx * scaleX) - (width / 2)
+        val y = (normCy * scaleY) - (height / 2)
+
+        val paddingW = width * paddingRatio
+        val paddingH = height * paddingRatio
+
+        return Rect(
+            (x - paddingW).roundToInt(),
+            (y - paddingH).roundToInt(),
+            (width + paddingW * 2).roundToInt(),
+            (height + paddingH * 2).roundToInt()
+        )
+    }
+
+    private fun repairWithOpenCV(wmBm: Bitmap, cleanBm: Bitmap, rect: Rect, originalPath: String) {
         val wmMat = Mat()
-        val origMat = Mat()
+        val cleanMat = Mat()
         Utils.bitmapToMat(wmBm, wmMat)
-        Utils.bitmapToMat(origBm, origMat)
-
-        // 对齐尺寸 (原图可能和水印图有细微差别，强行对齐)
-        Imgproc.resize(origMat, origMat, wmMat.size())
-
-        // 边界检查 (Clamping)
-        val x1 = max(0, rect.x)
-        val y1 = max(0, rect.y)
-        val x2 = min(wmMat.cols(), rect.x + rect.width)
-        val y2 = min(wmMat.rows(), rect.y + rect.height)
-
-        if (x2 <= x1 || y2 <= y1) return false
-
+        Utils.bitmapToMat(cleanBm, cleanMat)
+        
+        Imgproc.resize(cleanMat, cleanMat, wmMat.size())
+        
+        val x1 = rect.x.coerceIn(0, wmMat.cols() - 1)
+        val y1 = rect.y.coerceIn(0, wmMat.rows() - 1)
+        val x2 = (rect.x + rect.width).coerceIn(x1 + 1, wmMat.cols())
+        val y2 = (rect.y + rect.height).coerceIn(y1 + 1, wmMat.rows())
+        
         val safeRect = Rect(x1, y1, x2 - x1, y2 - y1)
-
-        // 核心操作：剪切原图区域 -> 覆盖水印图区域
-        val patch = origMat.submat(safeRect)
-        patch.copyTo(wmMat.submat(safeRect))
-
-        // 保存结果
+        cleanMat.submat(safeRect).copyTo(wmMat.submat(safeRect))
+        
         val resultBm = Bitmap.createBitmap(wmMat.cols(), wmMat.rows(), Bitmap.Config.ARGB_8888)
         Utils.matToBitmap(wmMat, resultBm)
         
-        saveToGallery(resultBm, "WeiboCleaned", "Fixed_${File(pathName).name}")
-        return true
+        saveToGallery(resultBm, "Fixed_${File(originalPath).name}")
     }
 
-    private fun saveToGallery(bm: Bitmap, folder: String, name: String) {
+    private fun saveToGallery(bm: Bitmap, fileName: String) {
         val cv = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+            put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
             put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
-            put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/$folder")
+            put(MediaStore.MediaColumns.RELATIVE_PATH, "Pictures/WeiboCleaner")
         }
-        val uri = context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)
-        uri?.let {
-            context.contentResolver.openOutputStream(it)?.use { out ->
-                bm.compress(Bitmap.CompressFormat.JPEG, 95, out)
+        context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)?.let { uri ->
+            context.contentResolver.openOutputStream(uri)?.use { out ->
+                bm.compress(Bitmap.CompressFormat.JPEG, 98, out)
             }
         }
     }
