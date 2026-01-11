@@ -124,10 +124,14 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     if (!_isWebViewReady || _webViewController == null) {
       _addLog("⏳ 内核正在唤醒...");
       await Future.delayed(const Duration(seconds: 1));
-      if (_webViewController == null) return;
+      if (_webViewController == null) {
+         _addLog("❌ 内核未就绪");
+         setState(() => _isProcessing = false);
+         return;
+      }
     }
 
-    _addLog("🕵️ 启动隐形侦察机...");
+    _addLog("🕵️ 启动隐形侦察机 (获取权限)...");
     _isWebViewLoading = true;
     _webViewTimeout?.cancel();
     _webViewTimeout = Timer(const Duration(seconds: 25), () {
@@ -144,51 +148,47 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     _isWebViewLoading = false;
     _webViewTimeout?.cancel();
     _webViewController?.stopLoading();
-    setState(() => _isProcessing = false);
+    // 不要在这里 set state false，因为可能还有后续流程
   }
 
   void _onWebViewUrlChanged(String? url) async {
     if (!_isWebViewLoading || url == null) return;
+    
+    // 调试日志
+    // print("WebView URL: $url");
+
     String? id = WeiboApi.parseIdFromUrl(url);
     if (id != null) {
       _addLog("✅ 捕获真实ID: $id");
       
-      // 🍪 关键修正：强制获取 m.weibo.cn 的 Cookie，而不是当前跳转链接的
+      // 🍪 窃取 Cookie
       String cookieStr = "";
       try {
-        // 尝试获取 API 根域名的 Cookie (这是访客通行证 _T_WM 的所在地)
         List<Cookie> cookies = await _cookieManager.getCookies(url: WebUri("https://m.weibo.cn"));
         cookieStr = cookies.map((c) => "${c.name}=${c.value}").join("; ");
-        
-        if (cookieStr.isEmpty) {
-           // 如果根域名没拿到，再试一下当前 URL 的
-           List<Cookie> cookiesCurrent = await _cookieManager.getCookies(url: WebUri(url));
-           cookieStr = cookiesCurrent.map((c) => "${c.name}=${c.value}").join("; ");
-        }
-        
-        if (cookieStr.isNotEmpty) _addLog("🍪 身份凭证已获取");
-      } catch (e) {
-        _addLog("⚠️ 凭证获取异常: $e");
-      }
+      } catch (e) { /* ignore */ }
 
       _stopBrowserAnalysis();
-      // 让浏览器跳转空页面，释放资源
       _webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri("about:blank")));
       
-      await _startDownloadAndRepair(id, cookieStr);
+      // 带 Cookie 下载
+      bool success = await _startDownloadAndRepair(id, cookieStr);
+      if (!success) {
+         _addLog("❌ 即便使用浏览器也未获取到图片，请确认链接内容");
+         setState(() => _isProcessing = false);
+      }
     }
   }
 
-  Future<void> _startDownloadAndRepair(String wid, String? cookie) async {
+  /// 返回 true 表示成功获取到图片，false 表示失败
+  Future<bool> _startDownloadAndRepair(String wid, String? cookie) async {
     setState(() => _isProcessing = true);
     _addLog("📦 正在提取图片...");
     
     var urls = await WeiboApi.getImageUrls(wid, cookie: cookie);
     
     if (urls.isEmpty) {
-      _addLog("⚠️ 无法获取图片 (可能需要登录或内容被删)");
-      setState(() => _isProcessing = false);
-      return;
+      return false; // 返回失败，交给调用方决定是否重试
     }
 
     _addLog("⬇️ 发现 ${urls.length} 张，下载中...");
@@ -200,8 +200,11 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
 
     if (localTasks.isNotEmpty) {
       await _runRepair(localTasks);
+      return true;
     } else {
+      _addLog("❌ 下载失败");
       setState(() => _isProcessing = false);
+      return true; // 虽然下载失败，但流程已走完
     }
   }
 
@@ -214,10 +217,27 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     String? url = WeiboApi.extractUrlFromText(rawText);
     if (url == null) { _addLog("❌ 未发现链接"); setState(() => _isProcessing = false); return; }
 
-    // 即使识别到直链 ID，也建议走一下浏览器以获取最新的访客 Cookie
-    _startBrowserAnalysis(url);
+    // 1. 尝试极速模式 (直接正则 + 无Cookie API)
+    String? fastId = WeiboApi.parseIdFromUrl(url);
+    bool fastSuccess = false;
+    
+    if (fastId != null) {
+      _addLog("⚡ 尝试极速解析 ID: $fastId");
+      // 尝试不带 Cookie 下载
+      fastSuccess = await _startDownloadAndRepair(fastId, null);
+    }
+
+    // 2. 如果极速模式失败 (例如需要Cookie的长链接)，启动浏览器兜底
+    if (!fastSuccess) {
+      if (fastId != null) _addLog("⚠️ 极速模式未获取到数据，转入深度解析...");
+      else _addLog("🔍 启动深度解析模式...");
+      
+      // 启动浏览器，它会自动处理跳转、Cookie，然后回调 _onWebViewUrlChanged
+      _startBrowserAnalysis(url);
+    }
   }
 
+  // ... (UI Build 部分) ...
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -237,7 +257,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     );
   }
   
-  // (UI 组件不变，直接复用)
+  // (UI 组件与之前一致)
   Widget _buildLinkTab() { return Padding(padding: const EdgeInsets.all(16.0), child: Column(children: [TextField(controller: _linkController, decoration: InputDecoration(hintText: "在此粘贴微博链接", border: const OutlineInputBorder(), suffixIcon: IconButton(icon: const Icon(Icons.paste), onPressed: () async { ClipboardData? data = await Clipboard.getData(Clipboard.kTextPlain); if (data != null && data.text != null) _linkController.text = data.text!; }))), const SizedBox(height: 16), SizedBox(width: double.infinity, child: FilledButton.icon(onPressed: _isProcessing ? null : _handleLinkInput, icon: const Icon(Icons.download), label: const Text("一键提取并修复"), style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 12))))])); }
   Widget _buildControlPanel() { return Container(color: Colors.white, padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), child: Column(children: [Row(children: [const Text("置信度", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)), Expanded(child: Slider(value: _confidence, min: 0.1, max: 0.9, divisions: 8, onChanged: (v) => setState(() => _confidence = v))), Text("${(_confidence * 100).toInt()}%", style: const TextStyle(fontSize: 12))]), Row(children: [const Text("扩大区域", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)), Expanded(child: Slider(value: _paddingRatio, min: 0.0, max: 0.5, divisions: 10, onChanged: (v) => setState(() => _paddingRatio = v))), Text("${(_paddingRatio * 100).toInt()}%", style: const TextStyle(fontSize: 12))])])); }
   Widget _buildLogArea() { return Container(height: 140, width: double.infinity, margin: const EdgeInsets.all(12), padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12), boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 5)]), child: Scrollbar(child: SingleChildScrollView(controller: _logScrollController, child: Text(_log, style: TextStyle(color: Colors.grey[800], fontFamily: "monospace", fontSize: 11))))); }
@@ -246,7 +266,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
   Future<void> _pickSingle(bool isWm) async { final ImagePicker picker = ImagePicker(); final XFile? image = await picker.pickImage(source: ImageSource.gallery); if (image != null) setState(() { if (isWm) _singleWmPath = image.path; else _singleOrigPath = image.path; }); }
   void _runSingleRepair() { if (_singleWmPath != null && _singleOrigPath != null) _runRepair([{'wm': _singleWmPath!, 'clean': _singleOrigPath!}]); else Fluttertoast.showToast(msg: "需选择两张图片"); }
   Future<void> _pickBatch() async { FilePickerResult? result = await FilePicker.platform.pickFiles(allowMultiple: true, type: FileType.image); if (result != null) { List<String> files = result.paths.whereType<String>().toList(); List<Map<String, String>> tasks = []; List<String> wmFiles = files.where((f) => f.contains("-wm.")).toList(); for (var wm in wmFiles) { String expectedOrig = wm.replaceAll("-wm.", "-orig."); if (files.contains(expectedOrig)) tasks.add({'wm': wm, 'clean': expectedOrig}); } if (tasks.isEmpty) _addLog("⚠️ 未匹配到成对图片"); else _runRepair(tasks); } }
-  Widget _buildSingleTab() { return Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [_imgBox("水印图", _singleWmPath, true), const Icon(Icons.arrow_forward), _imgBox("无水印图", _singleOrigPath, false)]), const SizedBox(height: 20), FilledButton(onPressed: _isProcessing ? null : _runSingleRepair, child: const Text("执行修复"))])); }
+  Widget _buildSingleTab() { return Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [_imgBox("水印图", _singleWmPath, true), const Icon(Icons.arrow_forward), _imgBox("原图", _singleOrigPath, false)]), const SizedBox(height: 20), FilledButton(onPressed: _isProcessing ? null : _runSingleRepair, child: const Text("执行修复"))])); }
   Widget _buildBatchTab() { return Center(child: FilledButton.icon(onPressed: _isProcessing ? null : _pickBatch, icon: const Icon(Icons.folder_open), label: const Text("批量选择"))); }
   Widget _imgBox(String label, String? path, bool isWm) { return GestureDetector(onTap: () => _pickSingle(isWm), child: Container(width: 100, height: 100, decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.grey.shade300), image: path != null ? DecorationImage(image: FileImage(File(path)), fit: BoxFit.cover) : null), child: path == null ? Center(child: Text(label)) : null)); }
 }
