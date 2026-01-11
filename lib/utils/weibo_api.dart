@@ -12,7 +12,7 @@ class WeiboApi {
     'X-Requested-With': 'XMLHttpRequest',
   };
 
-  // PC端伪装 (接口更稳)
+  // PC端伪装
   static const Map<String, String> _headersPC = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept': 'application/json, text/plain, */*',
@@ -44,29 +44,24 @@ class WeiboApi {
     return null;
   }
 
-  /// 🌟 核心：获取图片列表 (多策略 + 深度搜索)
   static Future<List<Map<String, String>>> getImageUrls(String weiboId, {String? cookie}) async {
     Dio dio = Dio();
     
-    // 策略 1: 移动端标准接口
-    print("📡 尝试策略 A (Mobile API)...");
+    // 策略 A
     List<Map<String, String>> resA = await _fetchMobile(dio, weiboId, cookie);
     if (resA.isNotEmpty) return resA;
 
-    // 策略 2: 移动端长文接口
-    print("📡 尝试策略 B (Mobile Extend)...");
+    // 策略 B
     List<Map<String, String>> resB = await _fetchMobile(dio, weiboId, cookie, isExtend: true);
     if (resB.isNotEmpty) return resB;
 
-    // 策略 3: PC端 Ajax 接口 (终极备选)
-    print("📡 尝试策略 C (PC Ajax)...");
+    // 策略 C
     List<Map<String, String>> resC = await _fetchPC(dio, weiboId, cookie);
     if (resC.isNotEmpty) return resC;
 
     return [];
   }
 
-  // 移动端请求逻辑
   static Future<List<Map<String, String>>> _fetchMobile(Dio dio, String id, String? cookie, {bool isExtend = false}) async {
     String url = isExtend 
         ? "https://m.weibo.cn/statuses/extend?id=$id"
@@ -79,59 +74,41 @@ class WeiboApi {
     try {
       final response = await dio.get(url);
       if (response.statusCode == 200) {
-        // 解析 JSON，注意：如果是 extend 接口，数据直接在根对象，如果是 show，可能在 data 字段
         var data = response.data;
-        if (data is Map && data.containsKey('data')) {
-           data = data['data']; // 脱壳
-        }
+        if (data is Map && data.containsKey('data')) data = data['data'];
         return _parseWeiboJson(data);
       }
     } catch (e) {
-      print("Mobile API Err: $e");
+      // ignore
     }
     return [];
   }
 
-  // PC端请求逻辑
   static Future<List<Map<String, String>>> _fetchPC(Dio dio, String id, String? cookie) async {
-    // PC 端 ID 转换：如果 ID 是纯数字且很长，PC 接口通常也能识别
     String url = "https://weibo.com/ajax/statuses/show?id=$id";
-    
     Map<String, String> headers = Map.from(_headersPC);
-    // PC端 Cookie 也很重要，尝试透传
     if (cookie != null) headers['Cookie'] = cookie;
     dio.options.headers = headers;
 
     try {
       final response = await dio.get(url);
-      if (response.statusCode == 200) {
-        return _parseWeiboJson(response.data);
-      }
+      if (response.statusCode == 200) return _parseWeiboJson(response.data);
     } catch (e) {
-      print("PC API Err: $e");
+      // ignore
     }
     return [];
   }
 
-  // 统一解析逻辑 (递归查找)
   static List<Map<String, String>> _parseWeiboJson(dynamic data) {
     if (data == null || data is! Map) return [];
     
     List<dynamic> pics = [];
-
-    // 1. 优先找 pics 字段
     if (data['pics'] != null) {
       pics = data['pics'];
-    } 
-    // 2. 如果没有，看看是不是转发的微博 (retweeted_status)
-    else if (data['retweeted_status'] != null && data['retweeted_status']['pics'] != null) {
-      print("🔄 发现转发内容，提取原博图片...");
+    } else if (data['retweeted_status'] != null && data['retweeted_status']['pics'] != null) {
       pics = data['retweeted_status']['pics'];
-    }
-    // 3. 还没找到？看看是不是 page_pic (文章封面)
-    else if (data['page_info'] != null && data['page_info']['page_pic'] != null) {
-      print("📄 发现文章封面...");
-      // 构造成 pics 的格式
+    } else if (data['page_info'] != null && data['page_info']['page_pic'] != null) {
+      // 您的那个 case 很可能命中了这里 (单张封面图)
       pics = [data['page_info']['page_pic']];
     }
 
@@ -140,7 +117,6 @@ class WeiboApi {
     List<Map<String, String>> results = [];
     for (var pic in pics) {
       String url = "";
-      // 兼容不同接口的字段名
       if (pic is Map) {
         if (pic.containsKey('large')) url = pic['large']['url'];
         else if (pic.containsKey('url')) url = pic['url'];
@@ -150,30 +126,31 @@ class WeiboApi {
 
       if (url.isEmpty) continue;
 
-      // 强力替换规则，确保拿到最高清
       String wmUrl = url.replaceAll(RegExp(r'(\/orj360\/|\/oslarge\/|\/mw690\/|\/thumbnail\/|\/bmiddle\/|\/thumb180\/|\/wap180\/)'), '/large/');
       String origUrl = url.replaceAll(RegExp(r'(\/orj360\/|\/large\/|\/mw690\/|\/thumbnail\/|\/bmiddle\/|\/thumb180\/|\/wap180\/)'), '/oslarge/');
       
       Uri uri = Uri.parse(url);
       String filename = uri.pathSegments.last.split('.').first;
       String ext = ".${uri.pathSegments.last.split('.').last}";
-      // 防止扩展名带参数
       if (ext.contains("?")) ext = ext.split("?").first;
 
-      results.add({
-        'wm_url': wmUrl,
-        'orig_url': origUrl,
-        'filename': filename,
-        'ext': ext
-      });
+      results.add({'wm_url': wmUrl, 'orig_url': origUrl, 'filename': filename, 'ext': ext});
     }
     return results;
   }
 
+  // 👇👇👇【关键修复】👇👇👇
   static Future<Map<String, String>?> downloadPair(Map<String, String> item, Function(String) onLog) async {
     Dio dio = Dio();
-    // 下载时不要带太多 Header，防止鉴权失败，只需要 User-Agent
-    dio.options.headers = {'User-Agent': _headersMobile['User-Agent']}; 
+    
+    // ✅ 破解 403 防盗链的关键：
+    // 必须带上 Referer: https://weibo.com/
+    // 以及一个合法的 User-Agent
+    dio.options.headers = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Referer': 'https://weibo.com/',
+      'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+    };
     
     Directory tempDir = await getTemporaryDirectory();
     String baseName = item['filename']!;
@@ -182,6 +159,7 @@ class WeiboApi {
     String origPath = "${tempDir.path}/$baseName-orig$ext";
 
     try {
+      // 并行下载加速
       await Future.wait([
         dio.download(item['wm_url']!, wmPath),
         dio.download(item['orig_url']!, origPath)
@@ -189,6 +167,7 @@ class WeiboApi {
       return {'wm': wmPath, 'clean': origPath};
     } catch (e) {
       onLog("❌ 下载失败 (${item['filename']}): ${e.toString()}");
+      // 403 错误通常会在这里被捕获，加上 Header 后应该就没事了
       return null;
     }
   }
