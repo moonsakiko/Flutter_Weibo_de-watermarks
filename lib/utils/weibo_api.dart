@@ -3,13 +3,22 @@ import 'package:path_provider/path_provider.dart';
 import 'dart:io';
 
 class WeiboApi {
-  static const Map<String, String> _baseHeaders = {
+  // 移动端伪装
+  static const Map<String, String> _headersMobile = {
     'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
     'Accept': 'application/json, text/plain, */*',
+    'MWeibo-Pwa': '1',
+    'Referer': 'https://m.weibo.cn/',
     'X-Requested-With': 'XMLHttpRequest',
   };
 
-  /// 🛠️ 宽容的链接提取
+  // PC端伪装 (接口更稳)
+  static const Map<String, String> _headersPC = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'application/json, text/plain, */*',
+    'Referer': 'https://weibo.com/',
+  };
+
   static String? extractUrlFromText(String text) {
     RegExp regExp = RegExp(r'(https?://[a-zA-Z0-9\.\/\-\_\?\=\&\%\#]+)');
     var match = regExp.firstMatch(text);
@@ -22,95 +31,149 @@ class WeiboApi {
     return null;
   }
 
-  /// 🆔 纯正则提取 ID
   static String? parseIdFromUrl(String url) {
     RegExp regStatus = RegExp(r'status(?:es)?\/(\d+)');
     var m1 = regStatus.firstMatch(url);
     if (m1 != null) return m1.group(1);
-
     RegExp regDetail = RegExp(r'detail\/(\d+)');
     var m2 = regDetail.firstMatch(url);
     if (m2 != null) return m2.group(1);
-
     RegExp regParam = RegExp(r'weibo_id=(\d+)');
     var m3 = regParam.firstMatch(url);
     if (m3 != null) return m3.group(1);
-
     return null;
   }
 
-  /// 🖼️ 获取图片列表 (支持 Cookie 注入 + 双接口备选)
+  /// 🌟 核心：获取图片列表 (多策略 + 深度搜索)
   static Future<List<Map<String, String>>> getImageUrls(String weiboId, {String? cookie}) async {
     Dio dio = Dio();
-    // 注入 Cookie，伪装成浏览器
-    Map<String, String> headers = Map.from(_baseHeaders);
-    if (cookie != null && cookie.isNotEmpty) {
-      headers['Cookie'] = cookie;
-      // print("🍪 注入 Cookie: ${cookie.substring(0, 20)}...");
-    }
-    dio.options.headers = headers;
+    
+    // 策略 1: 移动端标准接口
+    print("📡 尝试策略 A (Mobile API)...");
+    List<Map<String, String>> resA = await _fetchMobile(dio, weiboId, cookie);
+    if (resA.isNotEmpty) return resA;
 
-    // 策略 A: 标准接口
-    String urlA = "https://m.weibo.cn/statuses/show?id=$weiboId";
-    List<Map<String, String>> resultA = await _tryFetch(dio, urlA, "API-A");
-    if (resultA.isNotEmpty) return resultA;
+    // 策略 2: 移动端长文接口
+    print("📡 尝试策略 B (Mobile Extend)...");
+    List<Map<String, String>> resB = await _fetchMobile(dio, weiboId, cookie, isExtend: true);
+    if (resB.isNotEmpty) return resB;
 
-    // 策略 B: 扩展接口 (针对长微博/新版微博)
-    String urlB = "https://m.weibo.cn/statuses/extend?id=$weiboId";
-    List<Map<String, String>> resultB = await _tryFetch(dio, urlB, "API-B");
-    if (resultB.isNotEmpty) return resultB;
+    // 策略 3: PC端 Ajax 接口 (终极备选)
+    print("📡 尝试策略 C (PC Ajax)...");
+    List<Map<String, String>> resC = await _fetchPC(dio, weiboId, cookie);
+    if (resC.isNotEmpty) return resC;
 
     return [];
   }
 
-  static Future<List<Map<String, String>>> _tryFetch(Dio dio, String url, String tag) async {
+  // 移动端请求逻辑
+  static Future<List<Map<String, String>>> _fetchMobile(Dio dio, String id, String? cookie, {bool isExtend = false}) async {
+    String url = isExtend 
+        ? "https://m.weibo.cn/statuses/extend?id=$id"
+        : "https://m.weibo.cn/statuses/show?id=$id";
+    
+    Map<String, String> headers = Map.from(_headersMobile);
+    if (cookie != null) headers['Cookie'] = cookie;
+    dio.options.headers = headers;
+
     try {
       final response = await dio.get(url);
       if (response.statusCode == 200) {
-        final data = response.data;
-        List? pics;
-        
-        // 暴力解析 JSON 结构
-        if (data is Map) {
-          if (data['pics'] != null) pics = data['pics'];
-          else if (data['data'] is Map && data['data']['pics'] != null) pics = data['data']['pics'];
-          else if (data['data'] is Map && data['data']['page_pic'] != null) pics = [data['data']['page_pic']]; // 单图情况
+        // 解析 JSON，注意：如果是 extend 接口，数据直接在根对象，如果是 show，可能在 data 字段
+        var data = response.data;
+        if (data is Map && data.containsKey('data')) {
+           data = data['data']; // 脱壳
         }
-
-        if (pics == null || pics.isEmpty) {
-          // print("⚠️ [$tag] 无图片数据");
-          return [];
-        }
-
-        List<Map<String, String>> results = [];
-        for (var pic in pics) {
-          String url = pic['large']?['url'] ?? pic['url']; // 兼容不同字段
-          
-          String wmUrl = url.replaceAll(RegExp(r'(\/orj360\/|\/oslarge\/|\/mw690\/|\/thumbnail\/|\/bmiddle\/|\/thumb180\/)'), '/large/');
-          String origUrl = url.replaceAll(RegExp(r'(\/orj360\/|\/large\/|\/mw690\/|\/thumbnail\/|\/bmiddle\/|\/thumb180\/)'), '/oslarge/');
-          
-          Uri uri = Uri.parse(url);
-          String filename = uri.pathSegments.last.split('.').first;
-          String ext = ".${uri.pathSegments.last.split('.').last}";
-
-          results.add({
-            'wm_url': wmUrl,
-            'orig_url': origUrl,
-            'filename': filename,
-            'ext': ext
-          });
-        }
-        return results;
+        return _parseWeiboJson(data);
       }
     } catch (e) {
-      print("❌ [$tag] Error: $e");
+      print("Mobile API Err: $e");
     }
     return [];
+  }
+
+  // PC端请求逻辑
+  static Future<List<Map<String, String>>> _fetchPC(Dio dio, String id, String? cookie) async {
+    // PC 端 ID 转换：如果 ID 是纯数字且很长，PC 接口通常也能识别
+    String url = "https://weibo.com/ajax/statuses/show?id=$id";
+    
+    Map<String, String> headers = Map.from(_headersPC);
+    // PC端 Cookie 也很重要，尝试透传
+    if (cookie != null) headers['Cookie'] = cookie;
+    dio.options.headers = headers;
+
+    try {
+      final response = await dio.get(url);
+      if (response.statusCode == 200) {
+        return _parseWeiboJson(response.data);
+      }
+    } catch (e) {
+      print("PC API Err: $e");
+    }
+    return [];
+  }
+
+  // 统一解析逻辑 (递归查找)
+  static List<Map<String, String>> _parseWeiboJson(dynamic data) {
+    if (data == null || data is! Map) return [];
+    
+    List<dynamic> pics = [];
+
+    // 1. 优先找 pics 字段
+    if (data['pics'] != null) {
+      pics = data['pics'];
+    } 
+    // 2. 如果没有，看看是不是转发的微博 (retweeted_status)
+    else if (data['retweeted_status'] != null && data['retweeted_status']['pics'] != null) {
+      print("🔄 发现转发内容，提取原博图片...");
+      pics = data['retweeted_status']['pics'];
+    }
+    // 3. 还没找到？看看是不是 page_pic (文章封面)
+    else if (data['page_info'] != null && data['page_info']['page_pic'] != null) {
+      print("📄 发现文章封面...");
+      // 构造成 pics 的格式
+      pics = [data['page_info']['page_pic']];
+    }
+
+    if (pics.isEmpty) return [];
+
+    List<Map<String, String>> results = [];
+    for (var pic in pics) {
+      String url = "";
+      // 兼容不同接口的字段名
+      if (pic is Map) {
+        if (pic.containsKey('large')) url = pic['large']['url'];
+        else if (pic.containsKey('url')) url = pic['url'];
+      } else if (pic is String) {
+        url = pic;
+      }
+
+      if (url.isEmpty) continue;
+
+      // 强力替换规则，确保拿到最高清
+      String wmUrl = url.replaceAll(RegExp(r'(\/orj360\/|\/oslarge\/|\/mw690\/|\/thumbnail\/|\/bmiddle\/|\/thumb180\/|\/wap180\/)'), '/large/');
+      String origUrl = url.replaceAll(RegExp(r'(\/orj360\/|\/large\/|\/mw690\/|\/thumbnail\/|\/bmiddle\/|\/thumb180\/|\/wap180\/)'), '/oslarge/');
+      
+      Uri uri = Uri.parse(url);
+      String filename = uri.pathSegments.last.split('.').first;
+      String ext = ".${uri.pathSegments.last.split('.').last}";
+      // 防止扩展名带参数
+      if (ext.contains("?")) ext = ext.split("?").first;
+
+      results.add({
+        'wm_url': wmUrl,
+        'orig_url': origUrl,
+        'filename': filename,
+        'ext': ext
+      });
+    }
+    return results;
   }
 
   static Future<Map<String, String>?> downloadPair(Map<String, String> item, Function(String) onLog) async {
     Dio dio = Dio();
-    dio.options.headers = _baseHeaders; // 下载时只需要基础 Header
+    // 下载时不要带太多 Header，防止鉴权失败，只需要 User-Agent
+    dio.options.headers = {'User-Agent': _headersMobile['User-Agent']}; 
     
     Directory tempDir = await getTemporaryDirectory();
     String baseName = item['filename']!;
@@ -125,7 +188,7 @@ class WeiboApi {
       ]);
       return {'wm': wmPath, 'clean': origPath};
     } catch (e) {
-      onLog("❌ 下载失败 (${item['filename']})");
+      onLog("❌ 下载失败 (${item['filename']}): ${e.toString()}");
       return null;
     }
   }

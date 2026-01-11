@@ -62,7 +62,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
   static const platform = MethodChannel('com.example.weibo_cleaner/processor');
 
   InAppWebViewController? _webViewController;
-  CookieManager _cookieManager = CookieManager.instance(); // 🍪 Cookie 管理器
+  CookieManager _cookieManager = CookieManager.instance();
   bool _isWebViewReady = false; 
   bool _isWebViewLoading = false;
   Timer? _webViewTimeout;
@@ -85,7 +85,6 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
   }
 
   Future<void> _requestPermissionsDirectly() async {
-    // 🛡️ 降级权限：只请求基础存储权限
     await [Permission.storage, Permission.photos].request();
   }
 
@@ -131,7 +130,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     _addLog("🕵️ 启动隐形侦察机...");
     _isWebViewLoading = true;
     _webViewTimeout?.cancel();
-    _webViewTimeout = Timer(const Duration(seconds: 20), () { // 延长到20秒
+    _webViewTimeout = Timer(const Duration(seconds: 25), () {
       if (_isWebViewLoading) {
         _addLog("⏰ 解析超时");
         _stopBrowserAnalysis();
@@ -154,29 +153,36 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     if (id != null) {
       _addLog("✅ 捕获真实ID: $id");
       
-      // 🍪 核心操作：窃取 Cookie
+      // 🍪 关键修正：强制获取 m.weibo.cn 的 Cookie，而不是当前跳转链接的
       String cookieStr = "";
       try {
-        List<Cookie> cookies = await _cookieManager.getCookies(url: WebUri(url));
+        // 尝试获取 API 根域名的 Cookie (这是访客通行证 _T_WM 的所在地)
+        List<Cookie> cookies = await _cookieManager.getCookies(url: WebUri("https://m.weibo.cn"));
         cookieStr = cookies.map((c) => "${c.name}=${c.value}").join("; ");
-        // _addLog("🍪 凭证获取成功");
+        
+        if (cookieStr.isEmpty) {
+           // 如果根域名没拿到，再试一下当前 URL 的
+           List<Cookie> cookiesCurrent = await _cookieManager.getCookies(url: WebUri(url));
+           cookieStr = cookiesCurrent.map((c) => "${c.name}=${c.value}").join("; ");
+        }
+        
+        if (cookieStr.isNotEmpty) _addLog("🍪 身份凭证已获取");
       } catch (e) {
-        // _addLog("⚠️ 凭证获取失败，尝试无凭证访问");
+        _addLog("⚠️ 凭证获取异常: $e");
       }
 
       _stopBrowserAnalysis();
+      // 让浏览器跳转空页面，释放资源
       _webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri("about:blank")));
       
-      // 将 Cookie 传给 API
       await _startDownloadAndRepair(id, cookieStr);
     }
   }
 
   Future<void> _startDownloadAndRepair(String wid, String? cookie) async {
     setState(() => _isProcessing = true);
-    _addLog("📦 获取图片列表...");
+    _addLog("📦 正在提取图片...");
     
-    // 使用窃取到的 Cookie 发起请求
     var urls = await WeiboApi.getImageUrls(wid, cookie: cookie);
     
     if (urls.isEmpty) {
@@ -208,12 +214,10 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     String? url = WeiboApi.extractUrlFromText(rawText);
     if (url == null) { _addLog("❌ 未发现链接"); setState(() => _isProcessing = false); return; }
 
-    // 即使识别到 ID，也建议走浏览器获取 Cookie，除非是那种绝对公开的微博
-    // 为了稳妥，统一走浏览器流程，反正 Pixel Mode 很快
+    // 即使识别到直链 ID，也建议走一下浏览器以获取最新的访客 Cookie
     _startBrowserAnalysis(url);
   }
 
-  // ... (UI Build 部分保持不变) ...
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -233,7 +237,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     );
   }
   
-  // (UI 组件与上一版一致，直接复用即可)
+  // (UI 组件不变，直接复用)
   Widget _buildLinkTab() { return Padding(padding: const EdgeInsets.all(16.0), child: Column(children: [TextField(controller: _linkController, decoration: InputDecoration(hintText: "在此粘贴微博链接", border: const OutlineInputBorder(), suffixIcon: IconButton(icon: const Icon(Icons.paste), onPressed: () async { ClipboardData? data = await Clipboard.getData(Clipboard.kTextPlain); if (data != null && data.text != null) _linkController.text = data.text!; }))), const SizedBox(height: 16), SizedBox(width: double.infinity, child: FilledButton.icon(onPressed: _isProcessing ? null : _handleLinkInput, icon: const Icon(Icons.download), label: const Text("一键提取并修复"), style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 12))))])); }
   Widget _buildControlPanel() { return Container(color: Colors.white, padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), child: Column(children: [Row(children: [const Text("置信度", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)), Expanded(child: Slider(value: _confidence, min: 0.1, max: 0.9, divisions: 8, onChanged: (v) => setState(() => _confidence = v))), Text("${(_confidence * 100).toInt()}%", style: const TextStyle(fontSize: 12))]), Row(children: [const Text("扩大区域", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)), Expanded(child: Slider(value: _paddingRatio, min: 0.0, max: 0.5, divisions: 10, onChanged: (v) => setState(() => _paddingRatio = v))), Text("${(_paddingRatio * 100).toInt()}%", style: const TextStyle(fontSize: 12))])])); }
   Widget _buildLogArea() { return Container(height: 140, width: double.infinity, margin: const EdgeInsets.all(12), padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12), boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 5)]), child: Scrollbar(child: SingleChildScrollView(controller: _logScrollController, child: Text(_log, style: TextStyle(color: Colors.grey[800], fontFamily: "monospace", fontSize: 11))))); }
