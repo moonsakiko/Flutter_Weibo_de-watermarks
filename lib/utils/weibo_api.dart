@@ -3,138 +3,119 @@ import 'package:path_provider/path_provider.dart';
 import 'dart:io';
 
 class WeiboApi {
-  // 伪装成 Android 手机上的 Chrome 浏览器
-  static const Map<String, String> _headers = {
-    'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-    'Connection': 'keep-alive',
-    'Upgrade-Insecure-Requests': '1',
+  // 方案 A: Auto.js 同款请求头 (伪装成 iPhone) - 成功率最高
+  static const Map<String, String> _headers_ios = {
+    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.0.3 Mobile/15E148 Safari/604.1',
+    'Referer': 'https://m.weibo.cn/',
+    'Accept': 'application/json, text/plain, */*',
+    'X-Requested-With': 'XMLHttpRequest',
+  };
+
+  // 方案 B: 电脑端请求头 (伪装成 PC) - 用于对抗某些手机端强跳 APP 的情况
+  static const Map<String, String> _headers_pc = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
   };
 
   /// 🛠️ 工具：从混合文本中提取 http 链接
   static String? extractUrlFromText(String text) {
-    // 匹配 http:// 或 https:// 开始，直到空格或换行结束的字符串
     RegExp regExp = RegExp(r'(https?://[a-zA-Z0-9\.\/\-\_\?\=\&\%\#]+)');
     var match = regExp.firstMatch(text);
     return match?.group(0);
   }
 
-  /// 🕵️ 核心：终极链接追踪 (攻克 JS 跳转和 302 跳转)
-  static Future<String?> resolveRedirects(String url) async {
-    Dio dio = Dio();
-    dio.options.headers = _headers;
-    dio.options.followRedirects = false; // ⚠️ 我们手动控制跳转，为了抓取 JS 跳转
-    dio.options.validateStatus = (status) => status! < 500;
-    dio.options.sendTimeout = const Duration(seconds: 5);
-    dio.options.receiveTimeout = const Duration(seconds: 5);
+  /// 🕵️ 核心：多重策略解析 ID
+  static Future<String?> getWeiboId(String rawText) async {
+    // 1. 提取 URL
+    String? url = extractUrlFromText(rawText);
+    if (url == null) return null;
 
-    String currentUrl = url;
-    int maxSteps = 8; // 最大追踪深度
+    print("🔍 [解析开始] 原始链接: $url");
 
-    print("🔗 [开始追踪] $currentUrl");
+    // 2. 尝试策略 A (iOS 伪装) - 模仿 Auto.js
+    String? id = await _tryResolveId(url, _headers_ios, "策略A(iOS)");
+    if (id != null) return id;
 
-    for (int i = 0; i < maxSteps; i++) {
-      // 🎯 1. 检查是否已经是终点链接 (包含 status 或 detail)
-      if (currentUrl.contains("m.weibo.cn/status") || 
-          currentUrl.contains("weibo.cn/detail") ||
-          currentUrl.contains("/status/") // 兼容 PC 端链接
-         ) {
-        print("✅ [追踪成功] 锁定终点: $currentUrl");
-        return currentUrl;
-      }
+    // 3. 尝试策略 B (PC 伪装)
+    id = await _tryResolveId(url, _headers_pc, "策略B(PC)");
+    if (id != null) return id;
 
-      try {
-        Response response = await dio.get(currentUrl);
-
-        // 🎯 2. 处理 HTTP 3xx 跳转
-        if (response.statusCode == 301 || response.statusCode == 302 || response.statusCode == 307) {
-          String? location = response.headers.value('location');
-          if (location != null && location.isNotEmpty) {
-            // 处理相对路径
-            if (location.startsWith("/")) {
-               Uri u = Uri.parse(currentUrl);
-               currentUrl = "${u.scheme}://${u.host}$location";
-            } else {
-               currentUrl = location;
-            }
-            print("👉 [HTTP跳转] -> $currentUrl");
-            continue;
-          }
-        }
-
-        // 🎯 3. 处理 HTML JS 跳转 (Weibo 最爱用的招数)
-        // 它们会返回 200 OK，但在 body 里写 window.location.href
-        if (response.statusCode == 200) {
-          String body = response.data.toString();
-          
-          // 匹配 window.location.href = "..."
-          // 或者 window.location.replace("...")
-          RegExp jsRedirect = RegExp(r'location\.(?:href|replace)\s*[\(=]\s*["\x27]([^"\x27]+)["\x27]');
-          var match = jsRedirect.firstMatch(body);
-          
-          if (match != null) {
-            String newUrl = match.group(1)!;
-            // 很多时候是 'https://m.weibo.cn/status/...' 
-            currentUrl = newUrl;
-            print("👉 [JS伪装跳转] -> $currentUrl");
-            continue;
-          } else {
-            // 如果 200 OK 且没有 JS 跳转，可能这里就是终点，或者这是一个无需登录的页面
-            // 尝试直接返回当前 URL 碰碰运气
-            return currentUrl;
-          }
-        }
-      } catch (e) {
-        print("⚠️ 追踪中断: $e");
-        break;
-      }
-    }
-    return null; // 追踪失败
+    return null;
   }
 
-  /// 🆔 提取 ID
-  static Future<String?> getWeiboId(String rawText) async {
-    // 1. 先从乱七八糟的复制文本中提取出 URL
-    String? cleanUrl = extractUrlFromText(rawText);
-    if (cleanUrl == null) {
-      print("❌ 未在文本中发现 URL");
-      return null;
+  /// 内部方法：尝试解析
+  static Future<String?> _tryResolveId(String url, Map<String, String> headers, String strategyName) async {
+    Dio dio = Dio();
+    dio.options.headers = headers;
+    dio.options.followRedirects = true; // 让 Dio 自动跟进 302 跳转
+    dio.options.validateStatus = (status) => status! < 500;
+    dio.options.receiveTimeout = const Duration(seconds: 5);
+    dio.options.sendTimeout = const Duration(seconds: 5);
+
+    try {
+      // 发起请求
+      Response response = await dio.get(url);
+      
+      // 1. 检查最终 URL (Dio 会自动更新 realUri)
+      String finalUrl = response.realUri.toString();
+      String? id = _extractIdFromUrl(finalUrl);
+      if (id != null) {
+        print("✅ [$strategyName] 通过 URL 解析成功: $id");
+        return id;
+      }
+
+      // 2. 检查 Response Body (应对 200 OK 但包含 JS 跳转的情况)
+      if (response.statusCode == 200) {
+        String body = response.data.toString();
+        
+        // 匹配 HTML 中的 window.location.href = '...'
+        // 常见于 mapp.api.weibo.cn 的中间页
+        RegExp jsRedirect = RegExp(r'["\x27]((?:https?:)?\\?/\\?/m\.weibo\.cn\\?/status\\?/\d+)["\x27]');
+        var match = jsRedirect.firstMatch(body);
+        if (match != null) {
+          String newUrl = match.group(1)!.replaceAll('\\', ''); // 去除转义符
+          print("👉 [$strategyName] 发现 JS 跳转: $newUrl");
+          return _extractIdFromUrl(newUrl);
+        }
+
+        // 匹配 render_data 中的 id (某些 PC 页面)
+        RegExp renderData = RegExp(r'"status_id":\s*"(\d+)"');
+        var match2 = renderData.firstMatch(body);
+        if (match2 != null) return match2.group(1);
+      }
+      
+    } catch (e) {
+      print("⚠️ [$strategyName] 失败: $e");
     }
+    return null;
+  }
 
-    // 2. 追踪最终 URL
-    String? finalUrl = await resolveRedirects(cleanUrl);
-    if (finalUrl == null) return null;
-
-    // 3. 正则提取 ID (增加多种匹配模式)
-    
-    // 模式 A: m.weibo.cn/status/49832...
+  /// 纯正则提取 ID
+  static String? _extractIdFromUrl(String url) {
+    // 模式 1: m.weibo.cn/status/49832...
     RegExp regStatus = RegExp(r'status(?:es)?\/(\d+)');
-    var m1 = regStatus.firstMatch(finalUrl);
+    var m1 = regStatus.firstMatch(url);
     if (m1 != null) return m1.group(1);
 
-    // 模式 B: m.weibo.cn/detail/49832...
+    // 模式 2: weibo.cn/detail/49832...
     RegExp regDetail = RegExp(r'detail\/(\d+)');
-    var m2 = regDetail.firstMatch(finalUrl);
+    var m2 = regDetail.firstMatch(url);
     if (m2 != null) return m2.group(1);
 
-    // 模式 C: weibo.com/12345/N5... (PC端 Base62 ID)
-    // 注意：微博 API 有时不支持 Base62 ID，通常需要转为数字 ID。
-    // 但 m.weibo.cn/statuses/show 接口通常比较智能，支持混合。
-    // 如果这里提取的是 N5xxx，后续 API 请求可能会失败，但这是最后的尝试。
-    RegExp regPc = RegExp(r'weibo\.com\/\d+\/([a-zA-Z0-9]+)');
-    var m3 = regPc.firstMatch(finalUrl);
+    // 模式 3: 参数 weibo_id=123
+    RegExp regParam = RegExp(r'weibo_id=(\d+)');
+    var m3 = regParam.firstMatch(url);
     if (m3 != null) return m3.group(1);
 
     return null;
   }
 
-  /// 🖼️ 获取图片
+  /// 🖼️ 获取图片 (保持不变，这部分是通用的)
   static Future<List<Map<String, String>>> getImageUrls(String weiboId) async {
     final url = "https://m.weibo.cn/statuses/show?id=$weiboId";
     Dio dio = Dio();
-    // 必须带 Header，否则会被判定为爬虫返回 403
-    dio.options.headers = _headers; 
+    // 使用 iOS Header 获取数据，通常最稳
+    dio.options.headers = _headers_ios; 
     
     try {
       print("📡 请求微博API: $url");
@@ -142,23 +123,25 @@ class WeiboApi {
       
       if (response.statusCode == 200) {
         final data = response.data;
-        // 检查数据结构
-        if (data == null || data['ok'] != 1) {
-          print("⚠️ API返回错误: $data");
-          return [];
+        // 容错处理
+        if (data == null) return [];
+        
+        // 有些返回结构是 data -> pics，有些是 data -> data -> pics
+        List? pics;
+        if (data['pics'] != null) {
+             pics = data['pics'];
+        } else if (data['data'] != null && data['data'] is Map && data['data']['pics'] != null) {
+             pics = data['data']['pics'];
         }
 
-        final pics = data['data']?['pics'] as List?;
         if (pics == null) return [];
 
         List<Map<String, String>> results = [];
         for (var pic in pics) {
           String url = pic['large']['url'];
           
-          // 强制替换为最高清的 livephoto 或者 large 链接
-          // 微博图床规则复杂，尝试替换所有可能的低清前缀
-          String wmUrl = url.replaceAll(RegExp(r'(\/orj360\/|\/oslarge\/|\/mw690\/|\/thumbnail\/|\/bmiddle\/)'), '/large/');
-          String origUrl = url.replaceAll(RegExp(r'(\/orj360\/|\/large\/|\/mw690\/|\/thumbnail\/|\/bmiddle\/)'), '/oslarge/');
+          String wmUrl = url.replaceAll(RegExp(r'(\/orj360\/|\/oslarge\/|\/mw690\/|\/thumbnail\/|\/bmiddle\/|\/thumb180\/)'), '/large/');
+          String origUrl = url.replaceAll(RegExp(r'(\/orj360\/|\/large\/|\/mw690\/|\/thumbnail\/|\/bmiddle\/|\/thumb180\/)'), '/oslarge/');
           
           String filename = url.split('/').last.split('?').first.split('.').first;
           String ext = ".${url.split('.').last.split('?').first}";
@@ -180,7 +163,7 @@ class WeiboApi {
 
   static Future<Map<String, String>?> downloadPair(Map<String, String> item, Function(String) onLog) async {
     Dio dio = Dio();
-    dio.options.headers = _headers; // 下载也带上 header 防止防盗链
+    dio.options.headers = _headers_ios; 
     
     Directory tempDir = await getTemporaryDirectory();
     String baseName = item['filename']!;
@@ -189,8 +172,11 @@ class WeiboApi {
     String origPath = "${tempDir.path}/$baseName-orig$ext";
 
     try {
-      await dio.download(item['wm_url']!, wmPath);
-      await dio.download(item['orig_url']!, origPath);
+      // 并行下载，提高速度
+      await Future.wait([
+        dio.download(item['wm_url']!, wmPath),
+        dio.download(item['orig_url']!, origPath)
+      ]);
       return {'wm': wmPath, 'clean': origPath};
     } catch (e) {
       onLog("❌ 下载失败 (${item['filename']}): ${e.toString()}");

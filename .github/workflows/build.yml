@@ -4,7 +4,7 @@ on:
 
 env:
   APP_LABEL: "微博去水印"      
-  FILE_NAME: "微博去水印"
+  FILE_NAME: "WeiboCleaner"
   PROJ_NAME: "weibo_cleaner"
 
 jobs:
