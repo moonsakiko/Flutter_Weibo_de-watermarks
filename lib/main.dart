@@ -235,8 +235,8 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
           Positioned(
             left: 0, 
             top: 0, 
-            width: 1, 
-            height: 1,
+            width: 10, 
+            height: 10,
             child: Opacity(
               opacity: 0.01, // 不能设为0，否则有些系统不渲染；设为0.01肉眼不可见但系统可见
               child: InAppWebView(

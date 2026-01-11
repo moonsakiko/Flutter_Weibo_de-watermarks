@@ -1,4 +1,4 @@
-name: Build Weibo Cleaner (Final Polish)
+name: Build Weibo Cleaner (Final Fix)
 on:
   workflow_dispatch:
 
@@ -28,36 +28,76 @@ jobs:
         with:
           flutter-version: '3.19.0'
 
-      # 🧠 智能重建工程
+      # 1. 重建工程
       - name: Recreate Android Project
         run: |
-          echo "🔥 Starting Smart Recreate Process..."
           mkdir -p user_backup
           
           KOTLIN_PATH="android/app/src/main/kotlin/com/example/${{ env.PROJ_NAME }}/MainActivity.kt"
-          MANIFEST_PATH="android/app/src/main/AndroidManifest.xml"
-
+          # 备份 Kotlin 代码
           if [ -f "$KOTLIN_PATH" ]; then
              cp "$KOTLIN_PATH" user_backup/
           fi
-          if [ -f "$MANIFEST_PATH" ]; then
-             cp "$MANIFEST_PATH" user_backup/
-          fi
 
+          # 删除旧安卓目录并重建
           rm -rf android
           flutter create . --platforms android --project-name ${{ env.PROJ_NAME }}
 
+          # 恢复 Kotlin 代码
           TARGET_DIR="android/app/src/main/kotlin/com/example/${{ env.PROJ_NAME }}"
           mkdir -p "$TARGET_DIR"
-          
           if [ -f "user_backup/MainActivity.kt" ]; then
              cp user_backup/MainActivity.kt "$TARGET_DIR/"
           fi
-          if [ -f "user_backup/AndroidManifest.xml" ]; then
-             cp user_backup/AndroidManifest.xml "$MANIFEST_PATH"
-          fi
 
-      # 💉 注入 build.gradle
+      # 2. ⚡⚡⚡【核心修复】强制重写 AndroidManifest.xml ⚡⚡⚡
+      # 这一步将强行注入网络权限和硬件加速开关
+      - name: Force Write AndroidManifest
+        run: |
+          cat > android/app/src/main/AndroidManifest.xml <<EOF
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <!-- ✅ 必须显式声明网络权限 -->
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+              <!-- 存储权限 -->
+              <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
+              <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
+              <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
+              <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>
+
+              <application
+                  android:label="${{ env.APP_LABEL }}"
+                  android:name="\${applicationName}"
+                  android:icon="@mipmap/ic_launcher"
+                  android:usesCleartextTraffic="true" 
+                  android:requestLegacyExternalStorage="true"
+                  android:hardwareAccelerated="true"> <!-- ✅ 必须开启硬件加速，否则WebView不启动 -->
+                  
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTop"
+                      android:theme="@style/LaunchTheme"
+                      android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+                      android:hardwareAccelerated="true"
+                      android:windowSoftInputMode="adjustResize">
+                      <meta-data
+                          android:name="io.flutter.embedding.android.NormalTheme"
+                          android:resource="@style/NormalTheme"
+                          />
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <meta-data
+                      android:name="flutterEmbedding"
+                      android:value="2" />
+              </application>
+          </manifest>
+          EOF
+
+      # 3. 注入 build.gradle (保持不变)
       - name: Overwrite build.gradle
         run: |
           cat > android/app/build.gradle <<EOF
@@ -92,7 +132,7 @@ jobs:
           }
           EOF
 
-      # 📦 搬运模型
+      # 4. 搬运模型
       - name: Place TFLite Model
         run: |
           mkdir -p android/app/src/main/assets
@@ -102,42 +142,18 @@ jobs:
             touch android/app/src/main/assets/yolov8_wm.tflite
           fi
 
-      # 🔧 修复项目配置
-      - name: Fix Project Settings
+      # 5. 修复配置并打包
+      - name: Build APK
         run: |
           sed -i 's/id "org.jetbrains.kotlin.android" version ".*"/id "org.jetbrains.kotlin.android" version "1.9.0"/g' android/settings.gradle
           flutter pub get
-
-      # 🎨 【核心】强制生成图标
-      - name: Generate App Icon
-        run: |
-          # 确保 pubspec.yaml 里有 flutter_launcher_icons 配置
-          # 确保 assets/images/icon.png 存在
+          # 重新生成图标，因为我们重写了Manifest
           if [ -f "assets/images/icon.png" ]; then
-             echo "🎨 Icon found, generating..."
              dart run flutter_launcher_icons
-          else
-             echo "⚠️ Icon file not found in assets/images/"
           fi
+          flutter build apk --release --target-platform android-arm64
 
-      # 🏷️ 注入中文名
-      - name: Change App Label
-        run: |
-          python3 -c "
-          import re
-          manifest_path = 'android/app/src/main/AndroidManifest.xml'
-          with open(manifest_path, 'r', encoding='utf-8') as f:
-              content = f.read()
-          new_content = re.sub(r'android:label=\"[^\"]*\"', 'android:label=\"${{ env.APP_LABEL }}\"', content)
-          with open(manifest_path, 'w', encoding='utf-8') as f:
-              f.write(new_content)
-          "
-
-      # 🔨 打包
-      - name: Build APK
-        run: flutter build apk --release --target-platform android-arm64
-
-      # 📤 上传
+      # 6. 上传
       - name: Rename and Upload
         run: |
           mv build/app/outputs/flutter-apk/app-release.apk "build/app/outputs/flutter-apk/${{ env.FILE_NAME }}.apk"
