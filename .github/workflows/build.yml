@@ -1,89 +1,65 @@
-name: Build Weibo Cleaner (Android)
+name: Build Weibo Cleaner (Final Polish)
 on:
-  workflow_dispatch: # 手动触发
+  workflow_dispatch:
 
-# 🛠️在此处定义APP名称和文件名
 env:
-  APP_LABEL: "微博去水印"      # 安装到手机显示的中文名
-  FILE_NAME: "WeiboCleaner"  # 下载的文件名(英文)
-  PROJ_NAME: "weibo_cleaner" # 内部项目名(必须小写下划线)
+  APP_LABEL: "微博去水印"      
+  FILE_NAME: "WeiboCleaner"
+  PROJ_NAME: "weibo_cleaner"
 
 jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      LANG: "en_US.UTF-8" # 强制UTF-8防止中文乱码
+      LANG: "en_US.UTF-8"
 
     steps:
-      # 1. 拉取代码
       - name: Checkout Code
         uses: actions/checkout@v3
 
-      # 2. 配置 Java 环境 (Java 17 是目前 Flutter 的标准)
       - name: Setup Java
         uses: actions/setup-java@v3
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      # 3. 配置 Flutter 环境
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.19.0' # 稳定版本
+          flutter-version: '3.19.0'
 
-      # 4. 🧠【核心】智能重建工程 (保留您的 Kotlin 代码)
-      - name: Recreate Android Project with User Logic
+      # 🧠 智能重建工程
+      - name: Recreate Android Project
         run: |
           echo "🔥 Starting Smart Recreate Process..."
           mkdir -p user_backup
           
-          # 定义您的 Kotlin 代码路径 (与包名 com.example.weibo_cleaner 对应)
           KOTLIN_PATH="android/app/src/main/kotlin/com/example/${{ env.PROJ_NAME }}/MainActivity.kt"
           MANIFEST_PATH="android/app/src/main/AndroidManifest.xml"
 
-          # [备份] 备份核心逻辑
           if [ -f "$KOTLIN_PATH" ]; then
-             echo "✅ Backing up MainActivity.kt"
              cp "$KOTLIN_PATH" user_backup/
-          else
-             echo "⚠️ Warning: MainActivity.kt not found at expected path!"
           fi
-          
-          # [备份] 备份权限清单
           if [ -f "$MANIFEST_PATH" ]; then
-             echo "✅ Backing up AndroidManifest.xml"
              cp "$MANIFEST_PATH" user_backup/
           fi
 
-          # [销毁] 删除旧的 android 文件夹
-          echo "🗑️ Deleting old android folder..."
           rm -rf android
-
-          # [重建] 生成纯净的安卓骨架
-          echo "🏗️ Creating new Android project..."
           flutter create . --platforms android --project-name ${{ env.PROJ_NAME }}
 
-          # [恢复] 恢复代码目录结构
           TARGET_DIR="android/app/src/main/kotlin/com/example/${{ env.PROJ_NAME }}"
           mkdir -p "$TARGET_DIR"
           
-          # [恢复] 还原 Kotlin 文件
           if [ -f "user_backup/MainActivity.kt" ]; then
              cp user_backup/MainActivity.kt "$TARGET_DIR/"
-             echo "✅ Restored MainActivity.kt"
           fi
-          
-          # [恢复] 还原 Manifest
           if [ -f "user_backup/AndroidManifest.xml" ]; then
              cp user_backup/AndroidManifest.xml "$MANIFEST_PATH"
-             echo "✅ Restored AndroidManifest.xml"
           fi
 
-      # 5. 💉【注入】自动生成 build.gradle (包含 OpenCV 和 TFLite)
+      # 💉 注入 build.gradle
       - name: Overwrite build.gradle
         run: |
-          echo "💉 Injecting Dependencies into build.gradle..."
           cat > android/app/build.gradle <<EOF
           plugins {
               id "com.android.application"
@@ -98,7 +74,7 @@ jobs:
               kotlinOptions { jvmTarget = '1.8' }
               defaultConfig {
                   applicationId "com.example.${{ env.PROJ_NAME }}"
-                  minSdkVersion 24  // OpenCV 和 TFLite 需要较高的 MinSDK
+                  minSdkVersion 24
                   targetSdkVersion flutter.targetSdkVersion
                   versionCode 1
                   versionName "1.0"
@@ -107,7 +83,6 @@ jobs:
           }
           flutter { source '../..' }
           dependencies {
-              // 👇 这里是您需要的核心库
               implementation "org.jetbrains.kotlin:kotlin-stdlib:1.9.0"
               implementation "org.tensorflow:tensorflow-lite:2.14.0"
               implementation "org.tensorflow:tensorflow-lite-support:0.4.4"
@@ -117,46 +92,52 @@ jobs:
           }
           EOF
 
-      # 6. 📦【搬运】处理模型文件
+      # 📦 搬运模型
       - name: Place TFLite Model
         run: |
           mkdir -p android/app/src/main/assets
-          # 检查根目录是否有模型
           if [ -f "yolov8_wm.tflite" ]; then
-            echo "✅ Found yolov8_wm.tflite, copying to assets..."
             cp yolov8_wm.tflite android/app/src/main/assets/
           else
-            echo "❌ Error: yolov8_wm.tflite not found in root directory!"
-            echo "⚠️ Creating a dummy file to prevent build crash (App will crash at runtime)"
             touch android/app/src/main/assets/yolov8_wm.tflite
           fi
 
-      # 7. 🏷️【改名】注入中文 APP 名称
-      - name: Change App Label (UTF-8 Safe)
+      # 🔧 修复项目配置
+      - name: Fix Project Settings
+        run: |
+          sed -i 's/id "org.jetbrains.kotlin.android" version ".*"/id "org.jetbrains.kotlin.android" version "1.9.0"/g' android/settings.gradle
+          flutter pub get
+
+      # 🎨 【核心】强制生成图标
+      - name: Generate App Icon
+        run: |
+          # 确保 pubspec.yaml 里有 flutter_launcher_icons 配置
+          # 确保 assets/images/icon.png 存在
+          if [ -f "assets/images/icon.png" ]; then
+             echo "🎨 Icon found, generating..."
+             dart run flutter_launcher_icons
+          else
+             echo "⚠️ Icon file not found in assets/images/"
+          fi
+
+      # 🏷️ 注入中文名
+      - name: Change App Label
         run: |
           python3 -c "
           import re
           manifest_path = 'android/app/src/main/AndroidManifest.xml'
           with open(manifest_path, 'r', encoding='utf-8') as f:
               content = f.read()
-          # 正则替换 label
           new_content = re.sub(r'android:label=\"[^\"]*\"', 'android:label=\"${{ env.APP_LABEL }}\"', content)
           with open(manifest_path, 'w', encoding='utf-8') as f:
               f.write(new_content)
           "
-          echo "✅ App label changed to: ${{ env.APP_LABEL }}"
 
-      # 8. 🔧【修复】强制修正 Kotlin 版本和环境配置
-      - name: Fix Project Settings
-        run: |
-          sed -i 's/id "org.jetbrains.kotlin.android" version ".*"/id "org.jetbrains.kotlin.android" version "1.9.0"/g' android/settings.gradle
-          flutter pub get
-
-      # 9. 🔨【打包】构建 Release APK
+      # 🔨 打包
       - name: Build APK
         run: flutter build apk --release --target-platform android-arm64
 
-      # 10. 📤【上传】重命名并上传
+      # 📤 上传
       - name: Rename and Upload
         run: |
           mv build/app/outputs/flutter-apk/app-release.apk "build/app/outputs/flutter-apk/${{ env.FILE_NAME }}.apk"

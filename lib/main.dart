@@ -4,6 +4,7 @@ import 'package:fluttertoast/fluttertoast.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart'; // 需添加依赖
 import 'dart:io';
 import 'utils/weibo_api.dart';
 
@@ -11,32 +12,57 @@ void main() {
   runApp(const MyApp());
 }
 
-class MyApp extends StatelessWidget {
+class MyApp extends StatefulWidget {
   const MyApp({super.key});
+
+  @override
+  State<MyApp> createState() => _MyAppState();
+}
+
+class _MyAppState extends State<MyApp> {
+  Color _seedColor = Colors.teal; // 默认青色
+
+  @override
+  void initState() {
+    super.initState();
+    _loadTheme();
+  }
+
+  Future<void> _loadTheme() async {
+    final prefs = await SharedPreferences.getInstance();
+    final colorVal = prefs.getInt('theme_color') ?? Colors.teal.value;
+    setState(() => _seedColor = Color(colorVal));
+  }
+
+  void _changeTheme(Color color) async {
+    setState(() => _seedColor = color);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('theme_color', color.value);
+  }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: '微博去水印',
+      title: 'Weibo Cleaner',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,
-        // 🎨 改为冷峻的青色 (Teal)
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal, brightness: Brightness.light),
-        scaffoldBackgroundColor: const Color(0xFFF0F2F5),
-        appBarTheme: const AppBarTheme(
-          backgroundColor: Colors.teal,
+        colorScheme: ColorScheme.fromSeed(seedColor: _seedColor, brightness: Brightness.light),
+        scaffoldBackgroundColor: const Color(0xFFF5F7FA),
+        appBarTheme: AppBarTheme(
+          backgroundColor: _seedColor,
           foregroundColor: Colors.white,
-          elevation: 2,
+          elevation: 0,
         ),
       ),
-      home: const HomePage(),
+      home: HomePage(onThemeChanged: _changeTheme),
     );
   }
 }
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key});
+  final Function(Color) onThemeChanged;
+  const HomePage({super.key, required this.onThemeChanged});
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -48,7 +74,6 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
 
   double _confidence = 0.4;
   double _paddingRatio = 0.1;
-  
   final ScrollController _logScrollController = ScrollController();
   String _log = "系统就绪。";
   bool _isProcessing = false;
@@ -61,16 +86,11 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
   void initState() {
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
-    // 🛡️ 启动即请求权限，不废话
     _requestPermissionsDirectly();
   }
 
   Future<void> _requestPermissionsDirectly() async {
-    await [
-      Permission.storage,
-      Permission.photos,
-      Permission.manageExternalStorage, // 尝试请求所有可能需要的
-    ].request();
+    await [Permission.storage, Permission.photos, Permission.manageExternalStorage].request();
   }
 
   void _addLog(String msg) {
@@ -91,29 +111,24 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     if (tasks.isEmpty) return;
     setState(() => _isProcessing = true);
     try {
-      _addLog("⚙️ 呼叫原生引擎 (Conf: ${_confidence.toStringAsFixed(2)})...");
-      
+      _addLog("⚙️ 呼叫原生引擎...");
       final result = await platform.invokeMethod('processImages', {
         'tasks': tasks,
         'confidence': _confidence,
         'padding': _paddingRatio,
       });
       
-      // 解析返回结果，如果包含 logs 字段则打印原生调试日志
       if (result is Map && result.containsKey('logs')) {
-         _addLog("\n🔍 [Native Logs]:\n${result['logs']}");
+         // 这里只简单显示Native Log的前500字符防止刷屏，或者根据需求显示
+         // _addLog("[Native]: ${result['logs']}"); 
       }
 
-      int count = 0;
-      if (result is Map && result.containsKey('count')) {
-         count = result['count'];
-      }
-
+      int count = result is Map ? result['count'] : 0;
       if (count > 0) {
-        _addLog("🎉 成功修复 $count 张，已存入相册");
+        _addLog("🎉 成功修复 $count 张");
         Fluttertoast.showToast(msg: "成功修复 $count 张");
       } else {
-        _addLog("⚠️ 0 张被修复。请检查 Native Log 确认模型是否工作。");
+        _addLog("⚠️ 0 张被修复。请调整置信度或区域。");
       }
     } on PlatformException catch (e) {
       _addLog("❌ 崩溃: ${e.message}");
@@ -122,7 +137,6 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     }
   }
 
-  // ... (链接下载逻辑与之前类似，但调用新的 API)
   Future<void> _handleLinkDownload() async {
     String link = _linkController.text.trim();
     if (link.isEmpty) return;
@@ -133,7 +147,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     String? wid = await WeiboApi.getWeiboId(link);
     
     if (wid == null) {
-      _addLog("❌ ID解析失败，请检查链接");
+      _addLog("❌ ID解析失败，尝试手动复制长链接");
       setState(() => _isProcessing = false);
       return;
     }
@@ -161,7 +175,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     }
   }
 
-  // ... (PickSingle, PickBatch 保持不变，代码略以节省篇幅，直接复制之前的逻辑即可)
+  // Pickers
   Future<void> _pickSingle(bool isWm) async {
     final ImagePicker picker = ImagePicker();
     final XFile? image = await picker.pickImage(source: ImageSource.gallery);
@@ -185,11 +199,6 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     FilePickerResult? result = await FilePicker.platform.pickFiles(allowMultiple: true, type: FileType.image);
     if (result != null) {
       List<String> files = result.paths.whereType<String>().toList();
-      _matchAndProcess(files);
-    }
-  }
-
-  void _matchAndProcess(List<String> files) {
       List<Map<String, String>> tasks = [];
       List<String> wmFiles = files.where((f) => f.contains("-wm.")).toList();
       for (var wm in wmFiles) {
@@ -204,6 +213,34 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
         _addLog("🔗 匹配 ${tasks.length} 对");
         _runRepair(tasks);
       }
+    }
+  }
+
+  void _showSkinDialog() {
+    showDialog(context: context, builder: (ctx) => AlertDialog(
+      title: const Text("选择主题色"),
+      content: Wrap(
+        spacing: 10,
+        children: [
+          _colorBtn(Colors.teal),
+          _colorBtn(Colors.pinkAccent),
+          _colorBtn(Colors.blueAccent),
+          _colorBtn(Colors.orange),
+          _colorBtn(Colors.indigo),
+          _colorBtn(Colors.black87),
+        ],
+      ),
+    ));
+  }
+
+  Widget _colorBtn(Color c) {
+    return GestureDetector(
+      onTap: () {
+        widget.onThemeChanged(c);
+        Navigator.pop(context);
+      },
+      child: Container(width: 40, height: 40, margin: const EdgeInsets.only(bottom: 10), decoration: BoxDecoration(color: c, shape: BoxShape.circle)),
+    );
   }
 
   @override
@@ -211,6 +248,9 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     return Scaffold(
       appBar: AppBar(
         title: const Text("Weibo Cleaner", style: TextStyle(fontWeight: FontWeight.bold)),
+        actions: [
+          IconButton(icon: const Icon(Icons.palette), onPressed: _showSkinDialog),
+        ],
         bottom: TabBar(
           controller: _tabController,
           indicatorColor: Colors.white,
@@ -280,10 +320,9 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
       margin: const EdgeInsets.all(12),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.9), // 🤍 改为白色半透明
+        color: Colors.white,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.grey.shade300),
-        boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 5)],
+        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 10)],
       ),
       child: Scrollbar(
         child: SingleChildScrollView(
@@ -291,7 +330,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
           child: Text(
             _log,
             style: TextStyle(
-              color: Colors.grey[800], // 🖋️ 深灰字体，清晰易读
+              color: Colors.grey[800],
               fontFamily: "monospace",
               fontSize: 11,
             ),
@@ -301,9 +340,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     );
   }
 
-  // ... (LinkTab, SingleTab, BatchTab 的构建逻辑与之前相同，主要是配色变化，不再赘述占用篇幅)
-  // 请直接复用之前的 Widget 代码，将 ElevatedButton 的 style 改为 Colors.teal 即可
-    Widget _buildLinkTab() {
+  Widget _buildLinkTab() {
     return Padding(
       padding: const EdgeInsets.all(16.0),
       child: Column(
@@ -311,8 +348,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
           TextField(
             controller: _linkController,
             decoration: const InputDecoration(
-              labelText: "微博链接",
-              hintText: "支持 mapp 短链",
+              hintText: "支持 mapp/share 短链",
               border: OutlineInputBorder(),
               prefixIcon: Icon(Icons.link),
             ),
@@ -320,15 +356,11 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
           const SizedBox(height: 16),
           SizedBox(
             width: double.infinity,
-            child: ElevatedButton.icon(
+            child: FilledButton.icon(
               onPressed: _isProcessing ? null : _handleLinkDownload,
               icon: const Icon(Icons.download),
               label: const Text("提取并修复"),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.teal,
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 12),
-              ),
+              style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 12)),
             ),
           ),
         ],
@@ -336,54 +368,54 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     );
   }
 
+  // SingleTab, BatchTab (逻辑未变，直接复用或根据主题自适应颜色)
+  // 此处省略重复代码，与上一版一致，Flutter会自动应用 Theme 颜色
   Widget _buildSingleTab() {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-            children: [
-              _imgBox("水印图", _singleWmPath, true),
-              const Icon(Icons.arrow_forward),
-              _imgBox("原图", _singleOrigPath, false),
-            ],
-          ),
-          const SizedBox(height: 20),
-          ElevatedButton(
-            onPressed: _isProcessing ? null : _runSingleRepair,
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.teal, foregroundColor: Colors.white),
-            child: const Text("执行修复"),
-          )
-        ],
-      ),
-    );
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                _imgBox("水印图", _singleWmPath, true),
+                const Icon(Icons.arrow_forward),
+                _imgBox("原图", _singleOrigPath, false),
+              ],
+            ),
+            const SizedBox(height: 20),
+            FilledButton(
+              onPressed: _isProcessing ? null : _runSingleRepair,
+              child: const Text("执行修复"),
+            )
+          ],
+        ),
+      );
   }
 
   Widget _buildBatchTab() {
-     return Center(
-       child: ElevatedButton.icon(
-         onPressed: _isProcessing ? null : _pickBatch,
-         icon: const Icon(Icons.folder_open),
-         label: const Text("批量选择"),
-          style: ElevatedButton.styleFrom(backgroundColor: Colors.teal, foregroundColor: Colors.white),
-       ),
-     );
+      return Center(
+        child: FilledButton.icon(
+          onPressed: _isProcessing ? null : _pickBatch,
+          icon: const Icon(Icons.folder_open),
+          label: const Text("批量选择"),
+        ),
+      );
   }
 
   Widget _imgBox(String label, String? path, bool isWm) {
-    return GestureDetector(
-      onTap: () => _pickSingle(isWm),
-      child: Container(
-        width: 100, height: 100,
-        decoration: BoxDecoration(
-          color: Colors.white,
-          border: Border.all(color: Colors.grey.shade300),
-          borderRadius: BorderRadius.circular(8),
-          image: path != null ? DecorationImage(image: FileImage(File(path)), fit: BoxFit.cover) : null,
+      return GestureDetector(
+        onTap: () => _pickSingle(isWm),
+        child: Container(
+          width: 100, height: 100,
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: Colors.grey.shade300),
+            image: path != null ? DecorationImage(image: FileImage(File(path)), fit: BoxFit.cover) : null,
+          ),
+          child: path == null ? Center(child: Text(label)) : null,
         ),
-        child: path == null ? Center(child: Text(label)) : null,
-      ),
-    );
+      );
   }
 }

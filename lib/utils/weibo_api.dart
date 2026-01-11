@@ -3,59 +3,90 @@ import 'package:path_provider/path_provider.dart';
 import 'dart:io';
 
 class WeiboApi {
-  // 伪装成安卓微博客户端或浏览器
+  // 伪装成 Chrome 浏览器，而不是安卓客户端，这通常能获得更标准的重定向行为
   static const Map<String, String> _headers = {
     'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Upgrade-Insecure-Requests': '1',
   };
 
-  /// 🕵️ 强力链接追踪
+  /// 🕵️ 终极链接追踪
   static Future<String?> resolveRedirects(String url) async {
     Dio dio = Dio();
-    dio.options.headers = _headers;
-    dio.options.followRedirects = true;
+    // 允许 3xx 状态码不报错
     dio.options.validateStatus = (status) => status! < 500;
-    
+    dio.options.followRedirects = false; // 我们手动处理重定向
+    dio.options.headers = _headers;
+
+    String currentUrl = url;
+    int maxRedirects = 5; // 防止死循环
+
     try {
-      // 1. 尝试直接 HEAD 请求获取最终地址
-      Response response = await dio.head(url);
-      String realUrl = response.realUri.toString();
-      
-      // 2. 如果 HEAD 没拿到，尝试 GET
-      if (realUrl == url) {
-         response = await dio.get(url);
-         realUrl = response.realUri.toString();
+      for (int i = 0; i < maxRedirects; i++) {
+        // 如果已经是标准 ID 链接，直接返回
+        if (currentUrl.contains("m.weibo.cn/status") || currentUrl.contains("weibo.cn/detail")) {
+          return currentUrl;
+        }
+
+        Response response = await dio.get(currentUrl);
+        
+        // 检查 3xx 跳转
+        if (response.statusCode == 301 || response.statusCode == 302 || response.statusCode == 307) {
+          String? location = response.headers.value('location');
+          if (location != null && location.isNotEmpty) {
+            currentUrl = location;
+            // 处理相对路径跳转
+            if (currentUrl.startsWith("/")) {
+               Uri uri = Uri.parse(url);
+               currentUrl = "${uri.scheme}://${uri.host}$currentUrl";
+            }
+            continue; 
+          }
+        }
+        
+        // 某些 js 跳转或者 meta 刷新，直接返回最终 URL (Dio 会自动更新 realUri 如果开启 followRedirects, 但我们手动控制更稳)
+        // 如果这里返回的是 200，说明已经到达终点
+        if (response.statusCode == 200) {
+           // 有时候 mapp 会返回一个包含 script 的 html 来跳转，这里简单处理一下
+           // 如果内容包含 window.location.href，尝试提取（高级功能暂略，通常 header location 够用了）
+           return currentUrl;
+        }
+        break;
       }
-      return realUrl;
     } catch (e) {
       print("Link Resolve Error: $e");
-      return url; // 解析失败则返回原链接碰碰运气
     }
+    return currentUrl;
   }
 
   static Future<String?> getWeiboId(String link) async {
     String finalLink = link;
     
     // 只要不是标准链接，就去追踪
-    if (!link.contains("m.weibo.cn/status")) {
+    if (!link.contains("m.weibo.cn/status") && !link.contains("weibo.cn/detail")) {
       final resolved = await resolveRedirects(link);
       if (resolved != null) finalLink = resolved;
     }
 
-    // 正则提取
+    // 正则提取 1: m.weibo.cn/status/4988...
     RegExp regExp1 = RegExp(r'status(?:es)?\/(\d+)');
     var match1 = regExp1.firstMatch(finalLink);
     if (match1 != null) return match1.group(1);
 
-    RegExp regExp2 = RegExp(r'weibo_id=(\d+)');
+    // 正则提取 2: weibo.cn/detail/4988...
+    RegExp regExp2 = RegExp(r'detail\/(\d+)');
     var match2 = regExp2.firstMatch(finalLink);
     if (match2 != null) return match2.group(1);
+
+    // 正则提取 3: weibo_id=4988...
+    RegExp regExp3 = RegExp(r'weibo_id=(\d+)');
+    var match3 = regExp3.firstMatch(finalLink);
+    if (match3 != null) return match3.group(1);
 
     return null;
   }
 
   static Future<List<Map<String, String>>> getImageUrls(String weiboId) async {
-    // 使用 m.weibo.cn 的 API
     final url = "https://m.weibo.cn/statuses/show?id=$weiboId";
     Dio dio = Dio();
     try {
@@ -68,9 +99,8 @@ class WeiboApi {
         List<Map<String, String>> results = [];
         for (var pic in pics) {
           String url = pic['large']['url'];
-          // 替换高清规则
-          String wmUrl = url.replaceAll(RegExp(r'(\/orj360\/|\/oslarge\/|\/mw690\/)'), '/large/');
-          String origUrl = url.replaceAll(RegExp(r'(\/orj360\/|\/large\/|\/mw690\/)'), '/oslarge/');
+          String wmUrl = url.replaceAll(RegExp(r'(\/orj360\/|\/oslarge\/|\/mw690\/|\/thumbnail\/)'), '/large/');
+          String origUrl = url.replaceAll(RegExp(r'(\/orj360\/|\/large\/|\/mw690\/|\/thumbnail\/)'), '/oslarge/');
           
           String filename = url.split('/').last.split('?').first.split('.').first;
           String ext = ".${url.split('.').last.split('?').first}";
