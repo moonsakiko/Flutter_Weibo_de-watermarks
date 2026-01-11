@@ -5,7 +5,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:flutter_inappwebview/flutter_inappwebview.dart'; // 核心武器
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'dart:io';
 import 'dart:async';
 import 'utils/weibo_api.dart';
@@ -65,15 +65,16 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
   late TabController _tabController;
   static const platform = MethodChannel('com.example.weibo_cleaner/processor');
 
-  // 浏览器控制相关
+  // 浏览器控制
   InAppWebViewController? _webViewController;
+  bool _isWebViewReady = false; // 标记内核是否就绪
   bool _isWebViewLoading = false;
   Timer? _webViewTimeout;
 
   double _confidence = 0.4;
   double _paddingRatio = 0.1;
   final ScrollController _logScrollController = ScrollController();
-  String _log = "系统就绪。\n内核状态：等待启动...";
+  String _log = "系统初始化...\n";
   bool _isProcessing = false;
   final TextEditingController _linkController = TextEditingController();
 
@@ -101,7 +102,6 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     });
   }
 
-  // --- 核心修复流程 ---
   Future<void> _runRepair(List<Map<String, String>> tasks) async {
     if (tasks.isEmpty) return;
     setState(() => _isProcessing = true);
@@ -124,27 +124,27 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     }
   }
 
-  // --- 核心：启动浏览器解析 ---
+  // --- 浏览器相关逻辑 ---
   Future<void> _startBrowserAnalysis(String url) async {
-    if (_webViewController == null) {
-      _addLog("❌ 浏览器内核未初始化，请重启APP");
+    if (!_isWebViewReady || _webViewController == null) {
+      _addLog("⏳ 内核正在预热，请稍后重试...");
+      // 尝试重新加载一个空页面来唤醒
+      _webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri("about:blank")));
       setState(() => _isProcessing = false);
       return;
     }
 
-    _addLog("🕵️ 启动隐形侦察机，目标: $url");
+    _addLog("🕵️ 启动隐形侦察机: $url");
     _isWebViewLoading = true;
     
-    // 设置15秒超时
     _webViewTimeout?.cancel();
     _webViewTimeout = Timer(const Duration(seconds: 15), () {
       if (_isWebViewLoading) {
-        _addLog("⏰ 解析超时。可能需要登录或网络不通。");
+        _addLog("⏰ 解析超时，网络可能不通");
         _stopBrowserAnalysis();
       }
     });
 
-    // 加载链接
     _webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
   }
 
@@ -155,16 +155,14 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     setState(() => _isProcessing = false);
   }
 
-  // --- 浏览器回调：监听 URL 变化 ---
   void _onWebViewUrlChanged(String? url) async {
     if (!_isWebViewLoading || url == null) return;
-    // print("Debug URL: $url"); // 调试用
-
-    // 尝试提取 ID
     String? id = WeiboApi.parseIdFromUrl(url);
     if (id != null) {
       _addLog("✅ 捕获真实ID: $id");
-      _stopBrowserAnalysis(); // 停止浏览器，节省资源
+      _stopBrowserAnalysis();
+      // 停止加载后，跳转到一个空页面释放资源
+      _webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri("about:blank")));
       await _startDownloadAndRepair(id);
     }
   }
@@ -174,12 +172,12 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     _addLog("📦 获取图片列表...");
     var urls = await WeiboApi.getImageUrls(wid);
     if (urls.isEmpty) {
-      _addLog("⚠️ 无法获取图片，可能是视频或被删除");
+      _addLog("⚠️ 无法获取图片");
       setState(() => _isProcessing = false);
       return;
     }
 
-    _addLog("⬇️ 发现 ${urls.length} 张，开始下载...");
+    _addLog("⬇️ 发现 ${urls.length} 张，下载中...");
     List<Map<String, String>> localTasks = [];
     for (var item in urls) {
       var pair = await WeiboApi.downloadPair(item, (msg) => _addLog(msg));
@@ -202,39 +200,57 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     FocusScope.of(context).unfocus();
     setState(() => _isProcessing = true);
 
-    // 1. 简单的正则清洗
     String? url = WeiboApi.extractUrlFromText(rawText);
     if (url == null) {
-      _addLog("❌ 格式错误：未发现链接。\n提示：请确保复制的是类似 http... 的内容");
+      _addLog("❌ 未发现链接");
       setState(() => _isProcessing = false);
       return;
     }
 
-    // 2. 如果已经是最终 ID 链接，直接下载
     String? fastId = WeiboApi.parseIdFromUrl(url);
     if (fastId != null) {
-      _addLog("⚡ 识别到直链 ID: $fastId");
+      _addLog("⚡ 识别直链ID: $fastId");
       await _startDownloadAndRepair(fastId);
     } else {
-      // 3. 如果是短链 (mapp/t.cn)，交给浏览器解析
       _startBrowserAnalysis(url);
     }
   }
 
-  // ... (UI 构建部分) ...
-  
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: const Text("Weibo Cleaner", style: TextStyle(fontWeight: FontWeight.bold)),
-        actions: [
-          IconButton(icon: const Icon(Icons.palette), onPressed: _showSkinDialog),
-        ],
+        actions: [IconButton(icon: const Icon(Icons.palette), onPressed: _showSkinDialog)],
         bottom: TabBar(controller: _tabController, indicatorColor: Colors.white, tabs: const [Tab(text: "链接"), Tab(text: "单张"), Tab(text: "批量")]),
       ),
-      body: Stack(
+      // 🌟🌟🌟 核心改动：使用 IndexedStack 确保 WebView 始终被渲染 🌟🌟🌟
+      body: IndexedStack(
+        index: 1, // 显示 Index 1 (主界面)，Index 0 (浏览器) 在底层运行
         children: [
+          // Index 0: 隐形浏览器 (全屏渲染，但被遮挡)
+          InAppWebView(
+            initialSettings: InAppWebViewSettings(
+              userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+              javaScriptEnabled: true,
+              useShouldOverrideUrlLoading: true,
+              mediaPlaybackRequiresUserGesture: false,
+            ),
+            onWebViewCreated: (controller) {
+              _webViewController = controller;
+              _isWebViewReady = true;
+              // 这里的日志现在能看到了！
+              _addLog("✅ 内核装载成功 (Hidden Mode)");
+            },
+            onLoadStop: (controller, url) => _onWebViewUrlChanged(url?.toString()),
+            onUpdateVisitedHistory: (controller, url, isReload) => _onWebViewUrlChanged(url?.toString()),
+            onReceivedError: (controller, request, error) {
+               // 忽略部分网络错误，只要流程不崩
+               // _addLog("Browser Err: ${error.description}"); 
+            },
+          ),
+          
+          // Index 1: 您的主界面
           Column(
             children: [
               _buildControlPanel(),
@@ -242,82 +258,24 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
               _buildLogArea(),
             ],
           ),
-          
-          // 👇👇👇 核心黑科技：肉眼不可见但真实存在的浏览器 👇👇👇
-          Opacity(
-            opacity: 0.0, // 完全透明
-            child: SizedBox(
-              width: 1, height: 1, // 极小尺寸，不占布局
-              child: InAppWebView(
-                initialSettings: InAppWebViewSettings(
-                  userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1", // 伪装成 iPhone
-                  javaScriptEnabled: true, // 必须开启 JS
-                ),
-                onWebViewCreated: (controller) {
-                  _webViewController = controller;
-                  _addLog("内核状态：已装载 (v6.0)");
-                },
-                onLoadStop: (controller, url) => _onWebViewUrlChanged(url?.toString()),
-                onUpdateVisitedHistory: (controller, url, isReload) => _onWebViewUrlChanged(url?.toString()),
-              ),
-            ),
-          ),
         ],
       ),
     );
   }
 
-  // ... (保留之前的 ControlPanel, LinkTab, SingleTab, BatchTab 等 UI 代码，无需变动) ...
-  // 为完整性，这里贴出 LinkTab
+  // --- 以下 UI 组件保持不变 ---
   Widget _buildLinkTab() {
-    return Padding(
-      padding: const EdgeInsets.all(16.0),
-      child: Column(
-        children: [
-          TextField(
-            controller: _linkController,
-            decoration: InputDecoration(
-              hintText: "在此粘贴微博链接 (mapp/t.cn)",
-              border: const OutlineInputBorder(),
-              suffixIcon: IconButton(
-                icon: const Icon(Icons.paste),
-                onPressed: () async {
-                  ClipboardData? data = await Clipboard.getData(Clipboard.kTextPlain);
-                  if (data != null && data.text != null) _linkController.text = data.text!;
-                }, 
-              ),
-            ),
-          ),
-          const SizedBox(height: 16),
-          SizedBox(width: double.infinity, child: FilledButton.icon(
-            onPressed: _isProcessing ? null : _handleLinkInput,
-            icon: const Icon(Icons.download),
-            label: const Text("一键提取并修复"),
-            style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 12)),
-          )),
-        ],
-      ),
-    );
+    return Padding(padding: const EdgeInsets.all(16.0), child: Column(children: [
+      TextField(controller: _linkController, decoration: InputDecoration(hintText: "在此粘贴微博链接", border: const OutlineInputBorder(), suffixIcon: IconButton(icon: const Icon(Icons.paste), onPressed: () async { ClipboardData? data = await Clipboard.getData(Clipboard.kTextPlain); if (data != null && data.text != null) _linkController.text = data.text!; }))),
+      const SizedBox(height: 16),
+      SizedBox(width: double.infinity, child: FilledButton.icon(onPressed: _isProcessing ? null : _handleLinkInput, icon: const Icon(Icons.download), label: const Text("一键提取并修复"), style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 12)))),
+    ]));
   }
   
-  // (ControlPanel, SingleTab, BatchTab, SkinDialog 逻辑与上一版完全一致，请直接复用)
-  Widget _buildControlPanel() {
-    return Container(
-      color: Colors.white, padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      child: Column(children: [
-        Row(children: [const Text("置信度", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)), Expanded(child: Slider(value: _confidence, min: 0.1, max: 0.9, divisions: 8, onChanged: (v) => setState(() => _confidence = v))), Text("${(_confidence * 100).toInt()}%", style: const TextStyle(fontSize: 12))]),
-        Row(children: [const Text("扩大区域", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)), Expanded(child: Slider(value: _paddingRatio, min: 0.0, max: 0.5, divisions: 10, onChanged: (v) => setState(() => _paddingRatio = v))), Text("${(_paddingRatio * 100).toInt()}%", style: const TextStyle(fontSize: 12))]),
-      ]),
-    );
-  }
-  
-  Widget _buildLogArea() {
-    return Container(height: 140, width: double.infinity, margin: const EdgeInsets.all(12), padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12), boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 5)]), child: Scrollbar(child: SingleChildScrollView(controller: _logScrollController, child: Text(_log, style: TextStyle(color: Colors.grey[800], fontFamily: "monospace", fontSize: 11)))));
-  }
-
+  Widget _buildControlPanel() { return Container(color: Colors.white, padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), child: Column(children: [Row(children: [const Text("置信度", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)), Expanded(child: Slider(value: _confidence, min: 0.1, max: 0.9, divisions: 8, onChanged: (v) => setState(() => _confidence = v))), Text("${(_confidence * 100).toInt()}%", style: const TextStyle(fontSize: 12))]), Row(children: [const Text("扩大区域", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)), Expanded(child: Slider(value: _paddingRatio, min: 0.0, max: 0.5, divisions: 10, onChanged: (v) => setState(() => _paddingRatio = v))), Text("${(_paddingRatio * 100).toInt()}%", style: const TextStyle(fontSize: 12))])])); }
+  Widget _buildLogArea() { return Container(height: 140, width: double.infinity, margin: const EdgeInsets.all(12), padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12), boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 5)]), child: Scrollbar(child: SingleChildScrollView(controller: _logScrollController, child: Text(_log, style: TextStyle(color: Colors.grey[800], fontFamily: "monospace", fontSize: 11))))); }
   void _showSkinDialog() { showDialog(context: context, builder: (ctx) => AlertDialog(title: const Text("选择主题色"), content: Wrap(spacing: 10, children: [_colorBtn(Colors.teal), _colorBtn(Colors.pinkAccent), _colorBtn(Colors.blueAccent), _colorBtn(Colors.orange), _colorBtn(Colors.indigo), _colorBtn(Colors.black87)]))); }
   Widget _colorBtn(Color c) { return GestureDetector(onTap: () { widget.onThemeChanged(c); Navigator.pop(context); }, child: Container(width: 40, height: 40, margin: const EdgeInsets.only(bottom: 10), decoration: BoxDecoration(color: c, shape: BoxShape.circle))); }
-  
   Future<void> _pickSingle(bool isWm) async { final ImagePicker picker = ImagePicker(); final XFile? image = await picker.pickImage(source: ImageSource.gallery); if (image != null) setState(() { if (isWm) _singleWmPath = image.path; else _singleOrigPath = image.path; }); }
   void _runSingleRepair() { if (_singleWmPath != null && _singleOrigPath != null) _runRepair([{'wm': _singleWmPath!, 'clean': _singleOrigPath!}]); else Fluttertoast.showToast(msg: "需选择两张图片"); }
   Future<void> _pickBatch() async { FilePickerResult? result = await FilePicker.platform.pickFiles(allowMultiple: true, type: FileType.image); if (result != null) { List<String> files = result.paths.whereType<String>().toList(); List<Map<String, String>> tasks = []; List<String> wmFiles = files.where((f) => f.contains("-wm.")).toList(); for (var wm in wmFiles) { String expectedOrig = wm.replaceAll("-wm.", "-orig."); if (files.contains(expectedOrig)) tasks.add({'wm': wm, 'clean': expectedOrig}); } if (tasks.isEmpty) _addLog("⚠️ 未匹配到成对图片"); else _runRepair(tasks); } }

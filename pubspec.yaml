@@ -9,31 +9,15 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  
-  # UI图标
   cupertino_icons: ^1.0.2
-  
-  # 文件与图片选择
   image_picker: ^1.0.7
   file_picker: ^6.1.1
-  
-  # 权限管理
   permission_handler: ^11.3.0
-  
-  # 弹窗提示
   fluttertoast: ^8.2.4
-  
-  # 路径获取
   path_provider: ^2.1.2
-  
-  # 网络请求
   dio: ^5.4.0
-  
-  # 本地存储
   shared_preferences: ^2.2.2
-
-  # 👇👇👇【新增核武器】👇👇👇
-  # 浏览器内核，用于暴力解析 JS 跳转
+  # 🌐 核心浏览器组件
   flutter_inappwebview: ^6.0.0
 
 dev_dependencies:
