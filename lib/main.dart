@@ -148,7 +148,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     setState(() => _isProcessing = true);
     
     // 1. 提取链接 & 解析 ID
-    _addLog("🌐 正在解析链接...");
+    _addLog("🌐 正在智能解析链接(可能花费几秒钟)...");
     String? wid = await WeiboApi.getWeiboId(rawText);
     
     if (wid == null) {

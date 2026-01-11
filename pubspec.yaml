@@ -26,30 +26,27 @@ dependencies:
   # 路径获取
   path_provider: ^2.1.2
   
-  # 网络请求 (链接解析用)
+  # 网络请求
   dio: ^5.4.0
-  http: ^1.2.0
-
-  # 👇👇👇【本次报错缺失的关键库】👇👇👇
-  # 本地存储 (用于换肤记忆)
+  
+  # 本地存储
   shared_preferences: ^2.2.2
+
+  # 👇👇👇【新增核武器】👇👇👇
+  # 浏览器内核，用于暴力解析 JS 跳转
+  flutter_inappwebview: ^6.0.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^2.0.0
-  
-  # 图标生成工具
   flutter_launcher_icons: ^0.13.1
 
 flutter:
   uses-material-design: true
-  
-  # 资源路径配置
   assets:
     - assets/images/
 
-# 图标配置
 flutter_launcher_icons:
   android: "launcher_icon"
   ios: false
