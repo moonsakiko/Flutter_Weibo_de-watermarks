@@ -157,21 +157,41 @@ class MainActivity : FlutterActivity() {
         val scaleX = imgW.toFloat() / INPUT_SIZE
         val scaleY = imgH.toFloat() / INPUT_SIZE
         
-        val width = normW * scaleX
-        val height = normH * scaleY
-        // 中心点转左上角
-        val x = (normCx * scaleX) - (width / 2)
-        val y = (normCy * scaleY) - (height / 2)
+        // 1. 计算原始检测框 (AI 认为的区域)
+        val boxWidth = normW * scaleX
+        val boxHeight = normH * scaleY
+        val x = (normCx * scaleX) - (boxWidth / 2)
+        val y = (normCy * scaleY) - (boxHeight / 2)
 
-        val paddingW = width * paddingRatio
-        val paddingH = height * paddingRatio
+        // 2. 应用基础 Padding (上下左)
+        val padW = boxWidth * paddingRatio
+        val padH = boxHeight * paddingRatio
 
-        return Rect(
-            (x - paddingW).roundToInt(),
-            (y - paddingH).roundToInt(),
-            (width + paddingW * 2).roundToInt(),
-            (height + paddingH * 2).roundToInt()
-        )
+        // 3. 🎯【核心战术】：微博水印右侧补刀策略
+        // 既然AI只识别了左半边，我们不仅要补全右半边，还要防止遗漏。
+        // 直接让右边界延伸到图片的宽度的 98% 处 (留一点点边距防止越界)
+        // 只有当 AI 识别出的框在图片的右半部分时才启用此策略 (避免误伤画面左边的物体)
+        
+        var rectX = (x - padW).toInt()
+        var rectY = (y - padH).toInt()
+        var rectH = (boxHeight + padH * 2).toInt()
+        
+        // 初始宽度
+        var rectW = (boxWidth + padW * 2).toInt()
+
+        // 【判断】：如果水印中心点在图片右侧 (cx > 320)，说明这是右下角水印
+        // 微博水印通常都在右下角，偶尔居中
+        if (normCx > (INPUT_SIZE / 2)) {
+             // 计算从当前框左边到图片最右边的距离
+             val distToRight = imgW - rectX
+             // 强制覆盖到最右边 (稍微减一点像素防止溢出)
+             rectW = distToRight 
+        } else {
+             // 如果水印在左边或中间，尝试手动扩大宽度 (比如扩大到原来的3倍)
+             rectW = (rectW * 3.5).toInt()
+        }
+
+        return Rect(rectX, rectY, rectW, rectH)
     }
 
     private fun repairWithOpenCV(wmBm: Bitmap, cleanBm: Bitmap, rect: Rect, originalPath: String) {
